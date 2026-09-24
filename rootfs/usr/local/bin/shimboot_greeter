@@ -14,12 +14,13 @@ total_size="$(df -BM / | tail -n1 | awk '{print $2}' | tr -d 'M')"
 
 #print the greeter
 if [ "$shimboot_version" ]; then
-  echo "Welcome to the Shimboot Linux shell. (${shimboot_version})"
+  echo "Welcome to reshimboot ${shimboot_version} on $(uname -r)."
 else
-  echo "Welcome to the Shimboot Linux shell."
+  echo "Welcome to reshimboot."
 fi
 echo "For documentation and to report bugs, please visit the project's Github page:"
-echo " - https://github.com/ading2210/shimboot"
+echo " - https://github.com/heterodoxin/reshimboot"
+echo "Run 'shimboot-doctor' to check for common problems."
 
 #a rootfs under 7GB should mean that it is not yet expanded
 if [ "$percent_full" -gt 80 ] && [ "$total_size" -lt 7000 ]; then

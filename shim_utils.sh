@@ -1,94 +1,90 @@
 #!/bin/bash
 
-#utilties for reading shim disk images
+#utilities for reading chrome os shim and recovery images
+#none of these need loop devices, binwalk, or pcregrep
 
-run_binwalk() {
-  if binwalk -h | grep -- '--run-as' >/dev/null; then
-    binwalk "$@" --run-as=root
-  else
-    binwalk "$@"
+#the chrome os kernel for the shim always lives on KERN-A, and the rootfs on ROOT-A
+SHIM_KERNEL_PART=2
+SHIM_ROOTFS_PART=3
+
+#copy the shim's kernel partition to a file
+copy_kernel() {
+  local shim_path="$1"
+  local kernel_out="$2"
+  shimtool extract "$shim_path" "$SHIM_KERNEL_PART:$kernel_out"
+}
+
+#extract the initramfs that is embedded in a chrome os kernel partition
+extract_initramfs() {
+  local kernel_bin="$1"
+  local output_dir="$2"
+
+  rm -rf "$output_dir"
+  mkdir -p "$output_dir"
+  shimtool initramfs "$kernel_bin" | cpio -D "$output_dir" -imd --quiet --no-absolute-filenames
+  if [ ! -e "$output_dir/init" ]; then
+    print_error "the extracted initramfs does not contain an init script, the shim may be corrupted"
+    return 1
   fi
 }
 
-#extract the initramfs from a kernel image
-extract_initramfs() {
-  local kernel_bin="$1"
-  local working_dir="$2"
-  local output_dir="$3"
-
-  #extract the compressed kernel image from the partition data
-  local kernel_file="$(basename $kernel_bin)"
-  local binwalk_out=$(run_binwalk --extract $kernel_bin --directory=$working_dir)
-  local stage1_file=$(echo $binwalk_out | pcregrep -o1 "\d+\s+0x([0-9A-F]+)\s+gzip compressed data")
-  local stage1_dir="$working_dir/_$kernel_file.extracted"
-  local stage1_path="$stage1_dir/$stage1_file"
-  
-  #extract the initramfs cpio archive from the kernel image
-  run_binwalk --extract $stage1_path --directory=$stage1_dir > /dev/null
-  local stage2_dir="$stage1_dir/_$stage1_file.extracted/"
-  local cpio_file=$(file $stage2_dir/* | pcregrep -o1 "([0-9A-F]+):\s+ASCII cpio archive")
-  local cpio_path="$stage2_dir/$cpio_file"
-
-  rm -rf $output_dir
-  cat $cpio_path | cpio -D $output_dir -imd --quiet
-}
-
-extract_initramfs_arm() {
-  local kernel_bin="$1"
-  local working_dir="$2"
-  local output_dir="$3"
-
-  #extract the kernel lz4 archive from the partition
-  local binwalk_out="$(run_binwalk $kernel_bin)"
-  local lz4_offset="$(echo "$binwalk_out" | pcregrep -o1 "(\d+).+?LZ4 compressed data" | head -n1)"
-  local lz4_file="$working_dir/kernel.lz4"
-  local kernel_img="$working_dir/kernel_decompressed.bin"
-  dd if=$kernel_bin of=$lz4_file iflag=skip_bytes,count_bytes skip=$lz4_offset
-  lz4 -d $lz4_file $kernel_img -q || true
-
-  #extract the initramfs cpio archive from the kernel image
-  local extracted_dir="$working_dir/_kernel_decompressed.bin.extracted"
-  run_binwalk --extract $kernel_img --directory=$working_dir > /dev/null
-  local cpio_file=$(file $extracted_dir/* | pcregrep -o1 "([0-9A-F]+):\s+ASCII cpio archive")
-  local cpio_path="$extracted_dir/$cpio_file"
-
-  rm -rf $output_dir
-  cat $cpio_path | cpio -D $output_dir -imd --quiet
-}
-
-copy_kernel() {
-  local shim_path="$1"
-  local kernel_dir="$2"
-
-  local shim_loop=$(create_loop "${shim_path}")
-  local kernel_loop="${shim_loop}p2" #KERN-A should always be p2
-
-  dd if=$kernel_loop of=$kernel_dir/kernel.bin bs=1M status=progress
-  losetup -d $shim_loop
-}
-
-#copy the kernel image then extract the initramfs
+#copy the kernel image and then extract the initramfs from it
 extract_initramfs_full() {
   local shim_path="$1"
   local rootfs_dir="$2"
   local kernel_bin="$3"
-  local arch="$4"
-  local kernel_dir=/tmp/shim_kernel
+  local kernel_dir
+  kernel_dir="$(mktemp -d)"
 
-  echo "copying the shim kernel"
-  rm -rf $kernel_dir
-  mkdir $kernel_dir -p
-  copy_kernel $shim_path $kernel_dir
+  print_info "copying the shim kernel"
+  copy_kernel "$shim_path" "$kernel_dir/kernel.bin"
 
-  echo "extracting initramfs from kernel (this may take a while)"
-  if [ "$arch" = "arm64" ]; then
-    extract_initramfs_arm $kernel_dir/kernel.bin $kernel_dir $rootfs_dir
-  else
-    extract_initramfs $kernel_dir/kernel.bin $kernel_dir $rootfs_dir
+  print_info "extracting initramfs from the kernel"
+  print_info "shim kernel version: $(shimtool kernel-version "$kernel_dir/kernel.bin")"
+  extract_initramfs "$kernel_dir/kernel.bin" "$rootfs_dir"
+
+  if [ "$kernel_bin" ]; then
+    cp "$kernel_dir/kernel.bin" "$kernel_bin"
   fi
+  rm -rf "$kernel_dir"
+}
 
-  if [ "$kernel_bin" ]; then 
-    cp $kernel_dir/kernel.bin $kernel_bin
+#byte offset of a partition inside a disk image
+part_offset() {
+  shimtool gpt "$1" --part "$2" --field offset
+}
+
+#recursively copy a directory out of an ext2/3/4 partition inside a disk image
+#this uses debugfs so no loop device or mount is needed
+copy_from_image() {
+  local image="$1"
+  local part_num="$2"
+  local source="$3"
+  local dest="$4"
+
+  local offset
+  offset="$(part_offset "$image" "$part_num")"
+  mkdir -p "$dest"
+  #debugfs does not fail on missing paths, so check first
+  if ! debugfs -R "stat $source" "$image?offset=$offset" 2>/dev/null | grep -q "Type: directory"; then
+    print_warning "$source does not exist in partition $part_num of $(basename "$image")"
+    return 0
   fi
-  rm -rf $kernel_dir
+  debugfs -R "rdump $source $dest" "$image?offset=$offset" 2>/dev/null
+}
+
+#make sure a file is a chrome os disk image that is not truncated
+verify_disk_image() {
+  local image="$1"
+  local expected_parts="$2"
+  if ! shimtool gpt "$image" > /dev/null 2>&1; then
+    return 1
+  fi
+  local part_num end
+  for part_num in $expected_parts; do
+    end="$(( $(part_offset "$image" "$part_num") + $(shimtool gpt "$image" --part "$part_num" --field size) ))"
+    if [ "$(stat -c %s "$image")" -lt "$end" ]; then
+      return 1
+    fi
+  done
 }

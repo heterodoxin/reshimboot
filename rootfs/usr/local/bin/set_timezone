@@ -1,0 +1,31 @@
+#!/bin/bash
+
+#change the system timezone, for example: sudo set_timezone America/New_York
+
+print_help() {
+  echo "Usage: sudo set_timezone timezone"
+  echo "    Run 'timedatectl list-timezones' for a list of valid time zones."
+}
+
+if [ "$EUID" -ne 0 ]; then
+  printf "\033[1;31mThis script needs to be run as root.\033[0m\n"
+  exit 1
+fi
+
+if [ -z "$1" ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  print_help
+  exit 1
+fi
+
+time_zone="$1"
+if [ ! -f "/usr/share/zoneinfo/$time_zone" ]; then
+  printf "\033[1;31m%s is not a valid time zone.\033[0m\n" "$time_zone"
+  print_help
+  exit 1
+fi
+
+if ! timedatectl set-timezone "$time_zone" 2>/dev/null; then
+  ln -sf "/usr/share/zoneinfo/$time_zone" /etc/localtime
+  echo "$time_zone" > /etc/timezone
+fi
+printf "Time zone changed to \033[1;32m%s\033[0m.\n" "$time_zone"

@@ -13,6 +13,10 @@
 set +x
 
 rescue_mode=""
+AUTOBOOT_TIMEOUT=5
+if [ -f /opt/shimboot.conf ]; then
+  . /opt/shimboot.conf
+fi
 
 invoke_terminal() {
   local tty="$1"
@@ -20,7 +24,7 @@ invoke_terminal() {
   shift
   shift
   # Copied from factory_installer/factory_shim_service.sh.
-  echo "${title}" >>${tty}
+  echo "${title}" >>"${tty}"
   setsid sh -c "exec script -afqc '$*' /dev/null <${tty} >>${tty} 2>&1 &"
 }
 
@@ -36,7 +40,7 @@ get_part_dev() {
   local partition="$2"
 
   #disk paths ending with a number will have a "p" before the partition number
-  last_char="$(echo -n "$disk" | tail -c 1)"
+  local last_char="$(echo -n "$disk" | tail -c 1)"
   if [ "$last_char" -eq "$last_char" ] 2>/dev/null; then
     echo "${disk}p${partition}"
   else
@@ -45,13 +49,13 @@ get_part_dev() {
 }
 
 find_rootfs_partitions() {
-  local disks=$(fdisk -l | sed -n "s/Disk \(\/dev\/.*\):.*/\1/p")
+  local disks=$(fdisk -l 2>/dev/null | sed -n "s/Disk \(\/dev\/.*\):.*/\1/p")
   if [ ! "${disks}" ]; then
     return 1
   fi
 
   for disk in $disks; do
-    local partitions=$(fdisk -l $disk | sed -n "s/^[ ]\+\([0-9]\+\).*shimboot_rootfs:\(.*\)$/\1:\2/p")
+    local partitions=$(fdisk -l "$disk" 2>/dev/null | sed -n "s/^[ ]\+\([0-9]\+\).*shimboot_rootfs:\(.*\)$/\1:\2/p")
     if [ ! "${partitions}" ]; then
       continue
     fi
@@ -70,7 +74,7 @@ find_chromeos_partitions() {
       echo "${partition}:ChromeOS_ROOT-A:CrOS"
     done
   fi
-  
+
   if [ "$rootb_partitions" ]; then
     for partition in $rootb_partitions; do
       echo "${partition}:ChromeOS_ROOT-B:CrOS"
@@ -79,8 +83,8 @@ find_chromeos_partitions() {
 }
 
 find_all_partitions() {
-  echo "$(find_chromeos_partitions)"
-  echo "$(find_rootfs_partitions)"
+  find_chromeos_partitions
+  find_rootfs_partitions
 }
 
 #from original bootstrap.sh
@@ -94,17 +98,22 @@ move_mounts() {
   done
 }
 
-print_license() {
+get_version() {
   local shimboot_version="$(cat /opt/.shimboot_version)"
   if [ -f "/opt/.shimboot_version_dev" ]; then
-    local git_hash="$(cat /opt/.shimboot_version_dev)"
-    local suffix="-dev-$git_hash"
+    shimboot_version="${shimboot_version}-dev-$(cat /opt/.shimboot_version_dev)"
   fi
-  cat << EOF 
-Shimboot ${shimboot_version}${suffix}
+  echo "$shimboot_version"
+}
 
-ading2210/shimboot: Boot desktop Linux from a Chrome OS RMA shim.
+print_license() {
+  cat << EOF
+reshimboot $(get_version)
+
+heterodoxin/reshimboot: a modernized shimboot for dedede Chromebooks.
+Based on ading2210/shimboot: Boot desktop Linux from a Chrome OS RMA shim.
 Copyright (C) 2025 ading2210
+Copyright (C) 2026 reshimboot contributors
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -125,15 +134,17 @@ print_selector() {
   local rootfs_partitions="$1"
   local i=1
 
-  echo "┌──────────────────────┐"
-  echo "│ Shimboot OS Selector │"
-  echo "└──────────────────────┘"
+  echo "┌───────────────────────────┐"
+  echo "│ reshimboot OS Selector    │"
+  echo "└───────────────────────────┘"
+  echo "$(get_version) - kernel $(uname -r)"
+  echo
 
   if [ "${rootfs_partitions}" ]; then
     for rootfs_partition in $rootfs_partitions; do
       #i don't know of a better way to split a string in the busybox shell
-      local part_path=$(echo $rootfs_partition | cut -d ":" -f 1)
-      local part_name=$(echo $rootfs_partition | cut -d ":" -f 2)
+      local part_path="${rootfs_partition%%:*}"
+      local part_name="$(echo "$rootfs_partition" | cut -d ":" -f 2)"
       echo "${i}) ${part_name} on ${part_path}"
       i=$((i+1))
     done
@@ -144,6 +155,47 @@ print_selector() {
   echo "q) reboot"
   echo "s) enter a shell"
   echo "l) view license"
+  echo "type 'rescue <number>' to boot into a rescue shell"
+}
+
+#the first shimboot rootfs is booted automatically unless a key is pressed
+autoboot() {
+  local rootfs_partitions="$1"
+  if [ "$AUTOBOOT_TIMEOUT" -le 0 ] 2>/dev/null; then
+    return 1
+  fi
+
+  local i=1
+  local target=""
+  local target_name=""
+  local target_index=""
+  for rootfs_partition in $rootfs_partitions; do
+    local part_flags="$(echo "$rootfs_partition" | cut -d ":" -f 3)"
+    if [ "$part_flags" != "CrOS" ] && [ ! "$target" ]; then
+      target="${rootfs_partition%%:*}"
+      target_name="$(echo "$rootfs_partition" | cut -d ":" -f 2)"
+      target_index="$i"
+    fi
+    i=$((i+1))
+  done
+  if [ ! "$target" ]; then
+    return 1
+  fi
+
+  local remaining="$AUTOBOOT_TIMEOUT"
+  echo
+  while [ "$remaining" -gt 0 ]; do
+    printf "\rbooting %s in %s seconds, press any key for the menu... " "$target_name" "$remaining"
+    if read -t 1 -n 1 key; then
+      echo
+      return 1
+    fi
+    remaining=$((remaining-1))
+  done
+  echo
+  echo "selected ${target_index}) ${target_name} on ${target}"
+  boot_target "$target"
+  return 1
 }
 
 get_selection() {
@@ -175,9 +227,8 @@ get_selection() {
   fi
 
   for rootfs_partition in $rootfs_partitions; do
-    local part_path=$(echo $rootfs_partition | cut -d ":" -f 1)
-    local part_name=$(echo $rootfs_partition | cut -d ":" -f 2)
-    local part_flags=$(echo $rootfs_partition | cut -d ":" -f 3)
+    local part_path="${rootfs_partition%%:*}"
+    local part_flags="$(echo "$rootfs_partition" | cut -d ":" -f 3)"
 
     if [ "$selection" = "$i" ]; then
       echo "selected $part_path"
@@ -193,32 +244,25 @@ get_selection() {
 
     i=$((i+1))
   done
-  
+
   echo "invalid selection"
   sleep 1
   return 1
 }
 
-copy_progress() {
-  local source="$1"
-  local destination="$2"
-  mkdir -p "$destination"
-  tar -cf - -C "${source}" . | pv -f | tar -xf - -C "${destination}"
-}
-
 print_donor_selector() {
   local rootfs_partitions="$1"
-  local i=1;
+  local i=1
 
-  echo "Choose a partition to copy firmware and modules from:";
+  echo "Choose a partition to copy firmware and modules from:"
 
   for rootfs_partition in $rootfs_partitions; do
-    local part_path=$(echo $rootfs_partition | cut -d ":" -f 1)
-    local part_name=$(echo $rootfs_partition | cut -d ":" -f 2)
-    local part_flags=$(echo $rootfs_partition | cut -d ":" -f 3)
+    local part_path="${rootfs_partition%%:*}"
+    local part_name="$(echo "$rootfs_partition" | cut -d ":" -f 2)"
+    local part_flags="$(echo "$rootfs_partition" | cut -d ":" -f 3)"
 
     if [ "$part_flags" = "CrOS" ]; then
-      continue;
+      continue
     fi
 
     echo "${i}) ${part_name} on ${part_path}"
@@ -247,23 +291,31 @@ yes_no_prompt() {
 get_donor_selection() {
   local rootfs_partitions="$1"
   local target="$2"
-  local i=1;
+  local i=1
   read -p "Your selection: " selection
 
   for rootfs_partition in $rootfs_partitions; do
-    local part_path=$(echo $rootfs_partition | cut -d ":" -f 1)
-    local part_name=$(echo $rootfs_partition | cut -d ":" -f 2)
-    local part_flags=$(echo $rootfs_partition | cut -d ":" -f 3)
+    local part_path="${rootfs_partition%%:*}"
+    local part_flags="$(echo "$rootfs_partition" | cut -d ":" -f 3)"
 
     if [ "$part_flags" = "CrOS" ]; then
-      continue;
+      continue
     fi
 
     if [ "$selection" = "$i" ]; then
       echo "selected $part_path as the donor partition"
       yes_no_prompt "would you like to spoof verified mode? this is useful if you're planning on using chrome os while enrolled. (y/n): " use_crossystem
       yes_no_prompt "would you like to spoof an invalid hwid? this will forcibly prevent the device from being enrolled. (y/n): " invalid_hwid
-      boot_chromeos "$target" "$part_path" "$use_crossystem" "$invalid_hwid"
+      #blocking updates stops the forced "update required" screen during oobe,
+      #and stops chrome os from silently updating itself and undoing the spoof
+      block_updates="y"
+      if [ "$use_crossystem" = "n" ]; then
+        yes_no_prompt "would you like to block chrome os updates? recommended, this prevents the forced update screen. (y/n): " block_updates
+      else
+        echo "chrome os updates will be blocked to keep the verified mode spoof from being undone by an update."
+      fi
+      boot_chromeos "$target" "$part_path" "$use_crossystem" "$invalid_hwid" "$block_updates"
+      return 1
     fi
 
     i=$((i+1))
@@ -278,7 +330,7 @@ exec_init() {
   if [ "$rescue_mode" = "1" ]; then
     echo "entering a rescue shell instead of starting init"
     echo "once you are done fixing whatever is broken, run 'exec /sbin/init' to continue booting the system normally"
-    
+
     if [ -f "/bin/bash" ]; then
       exec /bin/bash < "$TTY1" >> "$TTY1" 2>&1
     else
@@ -289,24 +341,63 @@ exec_init() {
   fi
 }
 
+#undo a partially completed boot so that the menu can be shown again
+cleanup_boot() {
+  umount /newroot/proc 2>/dev/null
+  umount /newroot/dev 2>/dev/null
+  umount /newroot 2>/dev/null
+  if [ -e /dev/mapper/rootfs ]; then
+    cryptsetup close rootfs 2>/dev/null
+  fi
+}
+
+boot_failed() {
+  echo "$1"
+  cleanup_boot
+  read -p "press [enter] to return to the bootloader menu"
+  return 1
+}
+
 boot_target() {
   local target="$1"
+  local device="$target"
 
-  echo "moving mounts to newroot"
-  mkdir /newroot
+  mkdir -p /newroot
   #use cryptsetup to check if the rootfs is encrypted
-  if [ -x "$(command -v cryptsetup)" ] && cryptsetup luksDump "$target" >/dev/null 2>&1; then
-    cryptsetup open $target rootfs
-    mount /dev/mapper/rootfs /newroot
-  else
-    mount $target /newroot
+  if [ -x "$(command -v cryptsetup)" ] && cryptsetup isLuks "$target" >/dev/null 2>&1; then
+    local tries=0
+    while ! cryptsetup open --allow-discards "$target" rootfs; do
+      tries=$((tries+1))
+      if [ "$tries" -ge 3 ]; then
+        boot_failed "failed to unlock $target"
+        return 1
+      fi
+    done
+    device="/dev/mapper/rootfs"
   fi
+
+  #discard trims the usb/sd card, noatime avoids a write on every read
+  if ! mount -o rw,noatime,discard "$device" /newroot; then
+    #discard is not supported on every drive, so retry without it
+    if ! mount -o rw,noatime "$device" /newroot; then
+      boot_failed "failed to mount $device"
+      return 1
+    fi
+  fi
+
+  if [ ! -e /newroot/sbin/init ] && [ ! -L /newroot/sbin/init ]; then
+    boot_failed "$device does not contain /sbin/init, this is not a bootable rootfs"
+    return 1
+  fi
+
   #bind mount /dev/console to show systemd boot msgs
-  if [ -f "/bin/frecon-lite" ]; then 
+  if [ -f "/bin/frecon-lite" ]; then
     rm -f /dev/console
     touch /dev/console #this has to be a regular file otherwise the system crashes afterwards
     mount -o bind "$TTY1" /dev/console
   fi
+
+  echo "moving mounts to newroot"
   move_mounts /newroot
 
   echo "switching root"
@@ -320,28 +411,30 @@ boot_chromeos() {
   local donor="$2"
   local use_crossystem="$3"
   local invalid_hwid="$4"
-  
+  local block_updates="$5"
+
   echo "mounting target"
-  mkdir /newroot
-  mount -o ro $target /newroot
+  mkdir -p /newroot
+  if ! mount -o ro "$target" /newroot; then
+    boot_failed "failed to mount $target"
+    return 1
+  fi
 
   echo "mounting tmpfs"
   mount -t tmpfs -o mode=1777 none /newroot/tmp
   mount -t tmpfs -o mode=0555 run /newroot/run
   mkdir -p -m 0755 /newroot/run/lock
 
-  echo "mounting donor partition"
+  #the donor partition is bind mounted instead of copied into ram, which
+  #is faster and leaves more memory for chrome os
+  echo "mounting modules and firmware from the donor partition"
   local donor_mount="/newroot/tmp/donor_mnt"
-  local donor_files="/newroot/tmp/donor"
-  mkdir -p $donor_mount
-  mount -o ro $donor $donor_mount
-  echo "copying modules and firmware to tmpfs (this may take a while)"
-  copy_progress $donor_mount/lib/modules $donor_files/lib/modules
-  copy_progress $donor_mount/lib/firmware $donor_files/lib/firmware
-  mount -o bind $donor_files/lib/modules /newroot/lib/modules
-  mount -o bind $donor_files/lib/firmware /newroot/lib/firmware
-  umount $donor_mount
-  rm -rf $donor_mount
+  mkdir -p "$donor_mount"
+  mount -o ro "$donor" "$donor_mount"
+  mount -o bind,ro "$donor_mount/lib/modules" /newroot/lib/modules
+  mount -o bind,ro "$donor_mount/lib/firmware" /newroot/lib/firmware
+  umount "$donor_mount"
+  rmdir "$donor_mount"
 
   if [ -e "/newroot/etc/init/tpm-probe.conf" ]; then
     echo "applying chrome os flex patches"
@@ -359,10 +452,18 @@ boot_chromeos() {
   cp /opt/mount-encrypted /newroot/tmp/mount-encrypted
   cp /newroot/usr/sbin/mount-encrypted /newroot/tmp/mount-encrypted.real
   mount -o bind /newroot/tmp/mount-encrypted /newroot/usr/sbin/mount-encrypted
-  
+
   cat /newroot/etc/init/boot-splash.conf | sed '/^script$/a \  pkill frecon-lite || true' > /newroot/tmp/boot-splash.conf
   mount -o bind /newroot/tmp/boot-splash.conf /newroot/etc/init/boot-splash.conf
-  
+
+  #stop update_engine from running. otherwise oobe forces an "update required"
+  #screen every boot, and a completed update would boot normally and re-lock
+  #the device, undoing the spoof. this only affects this shimboot session.
+  if [ "$block_updates" = "y" ] && [ -f "/newroot/etc/init/update-engine.conf" ]; then
+    echo "blocking chrome os updates"
+    mount -o bind /opt/update-engine.conf /newroot/etc/init/update-engine.conf
+  fi
+
   if [ "$use_crossystem" = "y" ]; then
     echo "patching crossystem"
     cp /opt/crossystem /newroot/tmp/crossystem
@@ -392,6 +493,10 @@ main() {
   enable_debug_console "$TTY2"
 
   local valid_partitions="$(find_all_partitions)"
+
+  clear
+  print_selector "${valid_partitions}"
+  autoboot "${valid_partitions}"
 
   while true; do
     clear

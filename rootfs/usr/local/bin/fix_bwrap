@@ -1,10 +1,14 @@
 #!/bin/bash
 
+#the shim kernel does not allow unprivileged user namespaces, so bubblewrap
+#has to be setuid root for flatpak and steam to work.
+#/usr/bin/bwrap is already fixed when the image is built, so this is mostly
+#needed for the copies of bwrap that steam downloads into your home directory.
+
 set -e
 
 if [ ! "$HOME_DIR" ]; then
-  sudo HOME_DIR="$HOME" $0 
-  exit 0
+  exec sudo HOME_DIR="$HOME" "$0"
 fi
 
 fix_perms() {
@@ -13,18 +17,25 @@ fix_perms() {
   chmod u+s "$target_file"
 }
 
-echo "Fixing permissions for /usr/bin/bwrap"
-fix_perms /usr/bin/bwrap
+if [ -e /usr/bin/bwrap ]; then
+  echo "Fixing permissions for /usr/bin/bwrap"
+  if ! dpkg-statoverride --list /usr/bin/bwrap > /dev/null; then
+    dpkg-statoverride --update --add root root 4755 /usr/bin/bwrap
+  fi
+else
+  echo "bubblewrap is not installed, installing it now"
+  apt-get install -y bubblewrap
+  dpkg-statoverride --update --add root root 4755 /usr/bin/bwrap
+fi
 
-if [ ! -d "$HOME_DIR/.steam/" ]; then
+if [ ! -d "$HOME_DIR/.steam/" ] && [ ! -d "$HOME_DIR/.local/share/Steam/" ]; then
   echo "Steam not installed, so exiting early."
   echo "Done."
   exit 0
 fi
 
-echo "Fixing permissions bwrap binaries in Steam"
-steam_bwraps="$(find "$HOME_DIR/.steam/" -name 'srt-bwrap')"
-for bwrap_bin in $steam_bwraps; do
+echo "Fixing permissions for bwrap binaries in Steam"
+find "$HOME_DIR/.steam/" "$HOME_DIR/.local/share/Steam/" -name 'srt-bwrap' 2>/dev/null | while read -r bwrap_bin; do
   cp /usr/bin/bwrap "$bwrap_bin"
   fix_perms "$bwrap_bin"
 done

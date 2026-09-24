@@ -1,0 +1,21 @@
+#!/bin/bash
+
+#run by apt after every package installation or upgrade (see /etc/apt/apt.conf.d/99reshimboot)
+
+#debian's alsa-ucm-conf package overwrites the chromebook audio configs when it
+#is upgraded, so put them back
+if [ -d /usr/share/reshimboot/ucm2 ] && [ -d /usr/share/alsa/ucm2 ]; then
+  cp -a /usr/share/reshimboot/ucm2/. /usr/share/alsa/ucm2/
+fi
+
+#an unpatched systemd cannot boot with the shim kernel
+if ls /var/lib/apt/lists/*shimboot*_Packages > /dev/null 2>&1; then
+  installed="$(dpkg-query -W -f='${Version}' systemd 2>/dev/null)"
+  if [ "$installed" ] && ! apt-cache madison systemd 2>/dev/null | grep shimboot | grep -qF " $installed "; then
+    printf '\033[1;31m%s\033[0m\n' \
+      "WARNING: systemd $installed is not the patched version from the shimboot repo." \
+      "The system will most likely fail to boot. Do not reboot until this is fixed:" \
+      "  sudo apt update && sudo apt install --reinstall --allow-downgrades systemd libsystemd-shared libsystemd0" >&2
+  fi
+fi
+exit 0
