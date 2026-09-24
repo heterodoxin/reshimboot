@@ -5,49 +5,94 @@
 . ./common.sh
 
 print_help() {
-  echo "Usage: ./build_rootfs.sh rootfs_path release_name"
+  echo "Usage: ./build_rootfs.sh rootfs_path [release_name]"
+  echo "The release defaults to 'trixie' (Debian 13)."
   echo "Valid named arguments (specify with 'key=value'):"
-  echo "  custom_packages - The packages that will be installed in place of task-xfce-desktop."
-  echo "  hostname        - The hostname for the new rootfs."
-  echo "  enable_root     - Enable the root user."
-  echo "  root_passwd     - The root password. This only has an effect if enable_root is set."
-  echo "  username        - The unprivileged user name for the new rootfs."
-  echo "  user_passwd     - The password for the unprivileged user."
-  echo "  disable_base    - Disable the base packages such as zram, cloud-utils, and command-not-found."
-  echo "  arch            - The CPU architecture to build the rootfs for."
-  echo "  distro          - The Linux distro to use. This should be either 'debian' or 'alpine'."
+  echo "  custom_packages  - The packages that will be installed in place of task-xfce-desktop."
+  echo "  hostname         - The hostname for the new rootfs."
+  echo "  enable_root      - Enable the root user."
+  echo "  root_passwd      - The root password. This only has an effect if enable_root is set."
+  echo "  username         - The unprivileged user name for the new rootfs."
+  echo "  user_passwd      - The password for the unprivileged user."
+  echo "  disable_base     - Disable the base packages such as zram, NetworkManager, and firmware."
+  echo "  timezone         - The timezone, such as 'America/New_York'. Defaults to the build machine's timezone."
+  echo "  locale           - The system locale. Defaults to 'en_US.UTF-8'."
+  echo "  mirror           - The Debian mirror to use. Defaults to http://deb.debian.org/debian"
+  echo "  i386             - Set this to 0 to not enable 32-bit packages (needed for Steam and Wine)."
+  echo "  flatpak          - Set this to 0 to not install Flatpak and the Flathub repo."
+  echo "  auto_expand      - Set this to 0 to not grow the rootfs to fill the drive on the first boot."
+  echo "  extra_ca         - A CA certificate to trust during the build only, for networks that intercept HTTPS."
+  echo "  default_password - Set to 1 if user_passwd is a publicly known default, so the user is asked to change it."
+  echo "  cache_dir        - Keep downloaded Debian packages here, which makes later builds much faster."
   echo "If you do not specify the hostname and credentials, you will be prompted for them later."
 }
 
 assert_root
-assert_deps "realpath debootstrap findmnt wget pcregrep tar"
-assert_args "$2"
+assert_deps "realpath debootstrap findmnt"
+assert_args "$1"
 parse_args "$@"
 
-rootfs_dir=$(realpath -m "${1}")
-release_name="${2}"
-packages="${args['custom_packages']-task-xfce-desktop}"
-arch="${args['arch']-amd64}"
-distro="${args['distro']-debian}"
-chroot_mounts="proc sys dev run"
+rootfs_dir="$(realpath -m "$1")"
+release_name="${2:-trixie}"
+if [[ "$release_name" == *=* ]]; then
+  release_name="trixie"
+fi
 
-mkdir -p $rootfs_dir
+if [ "${args['distro']}" ] && [ "${args['distro']}" != "debian" ]; then
+  print_error "reshimboot only supports Debian. Alpine and Ubuntu support was removed."
+  exit 1
+fi
+if [ "${args['arch']}" ] && [ "${args['arch']}" != "$SHIMBOOT_ARCH" ]; then
+  print_error "reshimboot only supports dedede, which is an $SHIMBOOT_ARCH board."
+  exit 1
+fi
+
+case "$release_name" in
+  bookworm|trixie) ;;
+  forky|testing|sid|unstable)
+    print_warning "Warning: Debian $release_name is not a stable release."
+    print_warning "Newer systemd versions may not work with the 5.4 kernel that dedede's shim uses, and the"
+    print_warning "patched systemd in the shimboot repo can lag behind Debian. The build will stop if this happens."
+    ;;
+  *)
+    print_error "'$release_name' is not a supported Debian release. Use trixie (recommended), bookworm, forky, or sid."
+    exit 1
+    ;;
+esac
+
+host_timezone=""
+if [ -f /etc/timezone ]; then
+  host_timezone="$(cat /etc/timezone)"
+elif [ -L /etc/localtime ]; then
+  host_timezone="$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')"
+fi
+
+packages="${args['custom_packages']-task-xfce-desktop}"
+mirror="${args['mirror']:-http://deb.debian.org/debian}"
+chroot_mounts="proc sys dev"
+
+mkdir -p "$rootfs_dir"
 
 unmount_all() {
-  for mountpoint in $chroot_mounts; do
-    umount -l "$rootfs_dir/$mountpoint"
+  local mountpoint
+  for mountpoint in var/cache/apt/archives run dev/pts dev sys proc; do
+    if mountpoint -q "$rootfs_dir/$mountpoint"; then
+      umount -l "$rootfs_dir/$mountpoint"
+    fi
   done
 }
 
 need_remount() {
   local target="$1"
-  local mnt_options="$(findmnt -T "$target" | tail -n1 | rev | cut -f1 -d' '| rev)"
+  local mnt_options
+  mnt_options="$(findmnt -n -o OPTIONS -T "$target")"
   echo "$mnt_options" | grep -e "noexec" -e "nodev"
 }
 
 do_remount() {
   local target="$1"
-  local mountpoint="$(findmnt -T "$target" | tail -n1 | cut -f1 -d' ')"
+  local mountpoint
+  mountpoint="$(findmnt -n -o TARGET -T "$target")"
   mount -o remount,dev,exec "$mountpoint"
 }
 
@@ -55,80 +100,95 @@ if [ "$(need_remount "$rootfs_dir")" ]; then
   do_remount "$rootfs_dir"
 fi
 
-if [ "$distro" = "debian" ]; then
-  print_info "bootstraping debian chroot"
-  debootstrap --arch $arch --components=main,contrib,non-free,non-free-firmware "$release_name" "$rootfs_dir" http://deb.debian.org/debian/
-  chroot_script="/opt/setup_rootfs.sh"
-
-elif [ "$distro" = "ubuntu" ]; then 
-  print_info "bootstraping ubuntu chroot"
-  repo_url="http://archive.ubuntu.com/ubuntu"
-  if [ "$arch" = "amd64" ]; then
-    repo_url="http://archive.ubuntu.com/ubuntu"
-  else 
-    repo_url="http://ports.ubuntu.com"
+# shellcheck disable=SC2054  # the commas are part of a single --components argument
+debootstrap_opts=(--arch "$SHIMBOOT_ARCH" --components=main,contrib,non-free,non-free-firmware)
+cache_dir="${args['cache_dir']}"
+if [ "$cache_dir" ]; then
+  cache_dir="$(realpath -m "$cache_dir")"
+  mkdir -p "$cache_dir/apt-archives/partial"
+  #the base packages are cached in a tarball, which is refreshed every two
+  #weeks. anything that got updated since then is upgraded later anyway.
+  base_tarball="$cache_dir/debootstrap-$release_name-$SHIMBOOT_ARCH.tar"
+  find "$cache_dir" -maxdepth 1 -name "$(basename "$base_tarball")" -mtime +14 -delete
+  if [ ! -f "$base_tarball" ]; then
+    print_info "downloading the debian $release_name base packages into the cache"
+    tarball_work="$(mktemp -d "$cache_dir/debootstrap.XXXXXX")"
+    add_cleanup "rm -rf '$tarball_work'"
+    debootstrap "${debootstrap_opts[@]}" --make-tarball="$base_tarball.part" "$release_name" "$tarball_work" "$mirror"
+    mv "$base_tarball.part" "$base_tarball"
   fi
-  debootstrap --arch $arch "$release_name" "$rootfs_dir" "$repo_url"
-  chroot_script="/opt/setup_rootfs.sh"
-
-elif [ "$distro" = "alpine" ]; then
-  print_info "downloading alpine package list"
-  pkg_list_url="https://dl-cdn.alpinelinux.org/alpine/latest-stable/main/x86_64/"
-  pkg_data="$(wget -qO- --show-progress "$pkg_list_url" | grep "apk-tools-static")"
-  pkg_url="$pkg_list_url$(echo "$pkg_data" | pcregrep -o1 '"(.+?.apk)"')"
-
-  print_info "downloading and extracting apk-tools-static"
-  pkg_extract_dir="/tmp/apk-tools-static"
-  pkg_dl_path="$pkg_extract_dir/pkg.apk"
-  apk_static="$pkg_extract_dir/sbin/apk.static"
-  mkdir -p "$pkg_extract_dir"
-  wget -q --show-progress "$pkg_url" -O "$pkg_dl_path"
-  tar --warning=no-unknown-keyword -xzf "$pkg_dl_path" -C "$pkg_extract_dir"
-
-  print_info "bootstraping alpine chroot"
-  real_arch="x86_64"
-  if [ "$arch" = "arm64" ]; then 
-    real_arch="aarch64"
-  fi
-  $apk_static \
-    --arch $real_arch \
-    -X http://dl-cdn.alpinelinux.org/alpine/$release_name/main/ \
-    -U --allow-untrusted \
-    --root "$rootfs_dir" \
-    --initdb add alpine-base
-  chroot_script="/opt/setup_rootfs_alpine.sh"
-
-else
-  print_error "'$distro' is an invalid distro choice."
-  exit 1
+  debootstrap_opts+=(--unpack-tarball="$base_tarball")
 fi
 
+print_info "bootstrapping debian $release_name"
+debootstrap "${debootstrap_opts[@]}" "$release_name" "$rootfs_dir" "$mirror"
+
 print_info "copying rootfs setup scripts"
-cp -arv rootfs/* "$rootfs_dir"
-cp /etc/resolv.conf "$rootfs_dir/etc/resolv.conf"
+cp -a "$base_dir/rootfs/." "$rootfs_dir/"
+#this is a copy of the host's dns config for use during the build only
+cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf.build"
+rm -f "$rootfs_dir/etc/resolv.conf"
+cp "$rootfs_dir/etc/resolv.conf.build" "$rootfs_dir/etc/resolv.conf"
+
+#networks that intercept https need their certificate trusted inside the
+#chroot as well. it is only used during the build and removed afterwards.
+extra_ca="${args['extra_ca']}"
+if [ "$extra_ca" ]; then
+  if [ ! -f "$extra_ca" ]; then
+    print_error "the certificate $extra_ca does not exist"
+    exit 1
+  fi
+  mkdir -p "$rootfs_dir/usr/local/share/ca-certificates"
+  cp "$extra_ca" "$rootfs_dir/usr/local/share/ca-certificates/reshimboot-build.crt"
+fi
+
+#prevent package scripts from starting services inside the chroot
+cat > "$rootfs_dir/usr/sbin/policy-rc.d" << 'EOF'
+#!/bin/sh
+exit 101
+EOF
+chmod +x "$rootfs_dir/usr/sbin/policy-rc.d"
 
 print_info "creating bind mounts for chroot"
-trap unmount_all EXIT
+add_cleanup unmount_all
 for mountpoint in $chroot_mounts; do
-  mount --make-rslave --rbind "/${mountpoint}" "${rootfs_dir}/$mountpoint"
+  mkdir -p "$rootfs_dir/$mountpoint"
+  mount --make-rslave --rbind "/$mountpoint" "$rootfs_dir/$mountpoint"
 done
+#use a private /run so that package scripts cannot talk to the host's services
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$rootfs_dir/run"
 
-hostname="${args['hostname']}"
-root_passwd="${args['root_passwd']}"
-enable_root="${args['enable_root']}"
-username="${args['username']}"
-user_passwd="${args['user_passwd']}"
-disable_base="${args['disable_base']}"
+#share downloaded packages between builds
+apt_cache_shared=""
+if [ "$cache_dir" ]; then
+  rm -f "$rootfs_dir/var/cache/apt/archives/"*.deb
+  mount --bind "$cache_dir/apt-archives" "$rootfs_dir/var/cache/apt/archives"
+  apt_cache_shared="1"
+fi
 
-chroot_command="$chroot_script \
-  '$DEBUG' '$release_name' '$packages' \
-  '$hostname' '$root_passwd' '$username' \
-  '$user_passwd' '$enable_root' '$disable_base' \
-  '$arch'" 
+LC_ALL=C.UTF-8 chroot "$rootfs_dir" /usr/bin/env -i \
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  HOME=/root TERM="${TERM:-linux}" \
+  DEBUG="$DEBUG" \
+  RELEASE="$release_name" \
+  PACKAGES="$packages" \
+  NEW_HOSTNAME="${args['hostname']}" \
+  ROOT_PASSWD="${args['root_passwd']}" \
+  ENABLE_ROOT="${args['enable_root']}" \
+  NEW_USERNAME="${args['username']}" \
+  USER_PASSWD="${args['user_passwd']}" \
+  DISABLE_BASE="${args['disable_base']}" \
+  TIMEZONE="${args['timezone']:-${host_timezone:-Etc/UTC}}" \
+  NEW_LOCALE="${args['locale']:-en_US.UTF-8}" \
+  MIRROR="$mirror" \
+  ENABLE_I386="${args['i386']:-1}" \
+  ENABLE_FLATPAK="${args['flatpak']:-1}" \
+  AUTO_EXPAND="${args['auto_expand']:-1}" \
+  DEFAULT_PASSWORD="${args['default_password']}" \
+  APT_CACHE_SHARED="$apt_cache_shared" \
+  /bin/bash /opt/setup_rootfs.sh
 
-LC_ALL=C chroot $rootfs_dir /bin/sh -c "${chroot_command}"
-
-trap - EXIT
-unmount_all
+run_cleanups
+rm -f "$rootfs_dir/usr/sbin/policy-rc.d" "$rootfs_dir/opt/setup_rootfs.sh" "$rootfs_dir/etc/resolv.conf.build"
 
 print_info "rootfs has been created"

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=reshimboot welcome
+Comment=First login setup for reshimboot
+Exec=/usr/local/bin/reshimboot-welcome
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-Delay=3
+X-KDE-autostart-after=panel

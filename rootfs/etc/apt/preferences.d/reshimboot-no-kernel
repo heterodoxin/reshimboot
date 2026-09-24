@@ -1,0 +1,5 @@
+# The kernel from the shim is always used, so Debian kernels can never boot.
+# Blocking them saves space and a slow initramfs build on every upgrade.
+Package: linux-image-*
+Pin: version *
+Pin-Priority: -1

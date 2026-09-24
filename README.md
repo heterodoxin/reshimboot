@@ -1,267 +1,323 @@
-# Chrome OS RMA Shim Bootloader
+# reshimboot
 
-Shimboot is a collection of scripts for patching a Chrome OS RMA shim to serve as a bootloader for a standard Linux distribution. It allows you to boot a full desktop Debian install on a Chromebook, without needing to unenroll it or modify the firmware.
+**Boot a full, modern Debian desktop on a `dedede` Chromebook, from a USB drive, without touching the firmware. It works on enterprise-enrolled devices too.**
 
-| <img src="/website/assets/shimboot_demo_1.jpg" alt="Shimboot (KDE) on an HP Chromebook 11 G9 EE." width="400"/> | <img src="/website/assets/shimboot_demo_2.jpg" alt="Shimboot (XFCE) on an Acer Chromebook 311 C722." width="400"/> |  
-| ----- | ----- |
-| Shimboot (KDE) on an HP Chromebook 11 G9 EE | Shimboot (XFCE) on an Acer Chromebook 311 C722 |
+reshimboot is a fork of [ading2210/shimboot](https://github.com/ading2210/shimboot) rebuilt around a single board. By dropping multi-board support, every part of it can be tuned for dedede and its 5.4 shim kernel: Debian 13 by default, PipeWire, a safer bootloader, much faster builds, and fixes for the most common problems reported upstream.
 
-## Table of Contents:
-- [Features](#features)
-- [About](#about)
-  * [Partition Layout](#partition-layout)
-- [Status](#status)
-  * [Device Compatibility Table](#device-compatibility-table)
-  * [TODO](#todo)
-- [Usage](#usage)
-  * [Prerequisites](#prerequisites)
-  * [Video Tutorial](#video-tutorial)
-  * [Build Instructions](#build-instructions)
-  * [Booting the Image](#booting-the-image)
-- [FAQ](#faq)
-- [Copyright](#copyright)
-  * [Copyright Notice](#copyright-notice)
+> [!NOTE]
+> **This fork was developed with AI assistance** (Claude, by Anthropic). Every change was checked by building real images against the actual dedede shim and recovery image, and the bootloader logic was tested with the shim's own busybox. It has **not all been confirmed on real Chromebook hardware yet**. Features that still need that are marked below. See [About the AI-assisted development](#about-the-ai-assisted-development) for details, and please [report what works and what doesn't](https://github.com/heterodoxin/reshimboot/issues).
 
-<small><i>Table of contents generated with <a href='http://ecotrust-canada.github.io/markdown-toc/'>markdown-toc</a></i>.</small>
+## Contents
 
-## Features:
-- Run a full Debian installation on a Chromebook
-- Does not modify the firmware
-- Works on enterprise enrolled devices
-- Can boot Chrome OS with no restrictions (useful for enrolled devices)
-- Nearly full device compatibility
-- Optional disk compression and encryption
-- Multiple desktop environments supported
+- [Quick start](#quick-start)
+- [Is my Chromebook supported?](#is-my-chromebook-supported)
+- [What works](#what-works)
+- [What's new compared to shimboot](#whats-new-compared-to-shimboot)
+- [Building](#building)
+- [Flashing and booting](#flashing-and-booting)
+- [Using the bootloader](#using-the-bootloader)
+- [Booting Chrome OS through reshimboot](#booting-chrome-os-through-reshimboot)
+- [Troubleshooting and FAQ](#troubleshooting-and-faq)
+- [Why not a newer kernel? (kexec)](#why-not-a-newer-kernel-kexec)
+- [How it works](#how-it-works)
+- [Contributing](#contributing)
+- [About the AI-assisted development](#about-the-ai-assisted-development)
+- [Credits and license](#credits-and-license)
 
-## About:
-Chrome OS RMA shims are bootable disk images which are designed to run a variety of diagnostic utilities on Chromebooks, and they'll work even if the device is enterprise enrolled. Unfortunately for Google, there exists a [security flaw](https://sh1mmer.me/) where the root filesystem of the RMA shim is not verified. This lets us replace the rootfs with anything we want, including a full Linux distribution.
+## Quick start
 
-Simply replacing the shim's rootfs doesn't work, as it boots in an environment friendly to the RMA shim, not regular Linux distros. To get around this, a separate bootloader is required to transition from the shim environment to the main rootfs. This bootloader then runs `pivot_root` to enter the rootfs, where it then starts the init system.
+On a Linux machine (Debian or Ubuntu, or any distro [with Docker](#building-in-a-container)):
 
-Another problem is encountered at this stage: the Chrome OS kernel will complain about systemd's mounts, and the boot process will hang. A simple workaround is to [apply a patch](https://github.com/ading2210/chromeos-systemd) to systemd, and then it can be recompiled and hosted at a [repo somewhere](https://github.com/ading2210/shimboot-repo).
+```bash
+git clone https://github.com/heterodoxin/reshimboot
+cd reshimboot
+sudo ./build_complete.sh
+```
 
-After copying all the firmware from the recovery image and shim to the rootfs, we're able to boot to a mostly working XFCE desktop.
+1. Flash `data/shimboot_dedede.bin` to a USB drive or SD card (8 GB or larger).
+2. Put the Chromebook in developer mode (enrolled devices: see [sh1mmer](https://sh1mmer.me)), plug in the drive, and enter recovery mode.
+3. Debian boots automatically after a 5 second countdown. Log in as `user` / `user`, and the welcome screen asks you to pick a new password.
 
-The main advantages of this approach are that you don't need to touch the device's firmware in order to run Linux. Simply rebooting and unplugging the USB drive will return the device to normal, which can be useful if the device is enterprise enrolled. However, since we are stuck with the kernel from the RMA shim, some features such as audio and suspend may not work.
+## Is my Chromebook supported?
 
-### Partition Layout:
-1. 1MB dummy stateful partition
-2. 32MB Chrome OS kernel
-3. 20MB bootloader
-4. The rootfs partitions fill the rest of the disk
+Only if its board is **dedede**: the Intel Jasper Lake Chromebooks from 2021 and later, with a Celeron N4500, Celeron N5100, or Pentium Silver N6000. Search for your model on [cros.download](https://cros.download/recovery) to see its board name.
 
-Note that rootfs partitions have to be named `shimboot_rootfs:<partname>` for the bootloader to recognize them.
+Every dedede model uses the same shim and the same image:
 
-## Status:
-Driver support depends on the device you are using shimboot on. The `patch_rootfs.sh` script attempts to copy all the firmware and drivers from the shim and recovery image into the rootfs, so expect most things to work on other boards. Both x86_64 and ARM64 chromebooks are supported.
+> awadoron, awasuki, beadrix, beetley, blipper, bookem, boten, boxy, bugzzy, cret, cret360, dexi, dita, drawcia, drawlat, drawman, drawper, galith, galith360, gallop, galnat, galnat360, galtic, galtic360, kracko, kracko360, landia, landrid, lantis, madoo, magister, maglet, maglia, maglith, magma, magneto, magolor, magpie, metaknight, palutena, pasara, peezer, pirette, pirika, sasuke, sasukette, storo, storo360, taranza
 
-### Device Compatibility Table:
-| Board Name                                          | X11               | Wifi              | Speakers | Backlight | Touchscreen | 3D Accel          | Bluetooth | Webcam   |
-|-----------------------------------------------------|-------------------|-------------------|----------|-----------|-------------|-------------------|-----------|----------|
-| [`dedede`](https://cros.download/recovery/dedede)   | yes               | yes               | no       | yes       | yes         | yes               | yes       | yes      |
-| [`octopus`](https://cros.download/recovery/octopus) | yes               | yes               | yes      | yes       | yes         | yes               | yes       | yes      |
-| [`nissa`](https://cros.download/recovery/nissa)     | yes               | yes               | no       | yes       | yes         | yes               | yes       | yes      |
-| [`reks`](https://cros.download/recovery/reks)       | no<sup>[1]</sup>  | yes               | untested | untested  | untested    | no                | untested  | untested |
-| [`kefka`](https://cros.download/recovery/kefka)     | no<sup>[1]</sup>  | yes               | yes      | yes       | untested    | no                | untested  | untested |
-| [`zork`](https://cros.download/recovery/zork)       | yes               | yes               | no       | yes       | yes         | yes               | yes       | yes      |
-| [`grunt`](https://cros.download/recovery/grunt)     | yes<sup>[4]</sup> | yes<sup>[3]</sup> | no       | yes       | yes         | yes               | yes       | yes      |
-| [`jacuzzi`](https://cros.download/recovery/jacuzzi) | yes               | yes               | no       | yes       | untested    | no                | no        | yes      |
-| [`corsola`](https://cros.download/recovery/corsola) | yes               | yes               | no       | yes       | yes         | yes<sup>[5]</sup> | yes       | yes      |
-| [`hatch`](https://cros.download/recovery/hatch)     | yes               | yes<sup>[2]</sup> | no       | yes       | yes         | yes               | yes       | yes      |
-| [`snappy`](https://cros.download/recovery/snappy)   | yes               | yes               | yes      | yes       | yes         | yes               | yes       | yes      |
-| [`hana`](https://cros.download/recovery/hana)       | yes               | yes               | no       | yes       | untested    | yes               | yes       | no       |
+For any other board, use the [original shimboot](https://github.com/ading2210/shimboot).
 
-<sup>1. The kernel is too old.</sup><br>
-<sup>2. 5ghz wifi networks do not work, but 2.4ghz networks do.</sup><br>
-<sup>3. You may need to compile the wifi driver from source. See issue #69.</sup><br>
-<sup>4. X11 and LightDM might have some graphical issues.</sup><br>
-<sup>5. You need to use Wayland instead of X11.</sup>
+## What works
 
-This table is incomplete. If you want to contribute a device compatibility report please create a new issue on the Github repository.
+dedede's shim runs **Linux 5.4.85**, and that can't be changed (see [kexec](#why-not-a-newer-kernel-kexec)). Most hardware works; a few things are limited by that old kernel.
 
-On all devices, expect the following features to work:
-- Zram (compressed memory)
-- Disk compression with squashfs
+| Feature | shimboot | reshimboot | Notes |
+|---|---|---|---|
+| Desktop (X11 / Wayland) | ✅ | ✅ | XFCE by default; KDE, GNOME and others available |
+| 3D acceleration | ✅ | ✅ | Intel Gen 11 (Jasper Lake) |
+| Wi-Fi | ✅ | ✅ | Better defaults for WPA2/WPA3 networks |
+| Bluetooth | ✅ | ✅ | |
+| Touchscreen, touchpad, webcam, backlight | ✅ | ✅ | Tap to click and two-finger right click like Chrome OS |
+| Internal speakers and mic | ❌ | 🧪 | Firmware path and UCM fix included, **needs hardware confirmation** |
+| Hardware video decoding | ❔ | 🧪 | `intel-media-va-driver` included, **needs hardware confirmation** |
+| exFAT / NTFS drives | ❌ | ✅ | Through FUSE; the kernel has no driver for them |
+| iptables / firewalls | ❌ | ✅ | Legacy backend; the kernel has no nf_tables |
+| Steam and Flatpak sandboxes | ⚠️ manual fix | ✅ | `bwrap` is set up automatically |
+| Chrome OS without the forced update loop | ❌ | 🧪 | **Needs hardware confirmation** |
+| Compressed RAM swap (zram) | ✅ | ✅ | lzo-rle; the kernel has no zstd |
+| Suspend / hibernate | ❌ | ❌ | Disabled in the shim kernel; lid close locks instead |
+| nftables, WireGuard, overlayfs, btrfs | ❌ | ❌ | Not built into the shim kernel |
 
-On all devices, the following features will not work:
-- Suspend (disabled by the kernel)
-- Swap (disabled by the kernel)
+✅ works · 🧪 fix included but not yet confirmed on hardware · ⚠️ partly · ❌ doesn't work
 
-A possible workaround for audio issues is using a USB sound card. Certain "USB to headphone jack" adapters are complete sound cards, which are supported by Linux. See [issue #234](https://github.com/ading2210/shimboot/issues/234).
+## What's new compared to shimboot
 
-### TODO:
-- Finish Python TUI rewrite (see the `python` branch if you want to help with this)
-- Support for more distros (Ubuntu and Arch maybe)
-- Eliminate binwalk dependency
-- Get audio to work on dedede
-- Get kexec working
+**A safer bootloader**
+- Boots Debian automatically after a countdown; press any key for the menu.
+- **Checks and repairs the filesystem before every boot**, using a static `e2fsck`, so a drive that was pulled out mid-write gets fixed instead of getting worse. There is also an `f` option in the menu for a full repair.
+- Falls back to the menu when something fails, instead of hanging on a black screen. LUKS password prompts allow retries.
 
-PRs and contributions are welcome to help implement these features.
+**A better system**
+- Debian 13 (Trixie) with the security and updates repositories, PipeWire, NetworkManager, systemd-resolved and timesyncd.
+- A **welcome app** on first login that makes you replace the default password, because every prebuilt image shares it.
+- `shimboot-doctor` checks everything a bug report needs, and **`sudo shimboot-doctor --fix` repairs** the common problems automatically.
+- The rootfs grows to fill the drive on first boot.
+- Chromebook touchpad behaviour, keyboard layout (`croskbd`), and Flatpak with Flathub.
 
-## Usage:
+**Fixes for common upstream problems**
+- **Images built on Debian 13, Arch or Fedora couldn't boot.** Newer `mke2fs` enables ext4 features (like `orphan_file`) that Linux 5.4 can't mount read-write. reshimboot pins a kernel-safe feature set and checks it on every build.
+- **"Failed to mount API filesystems":** an unpatched systemd slipped in. The build now verifies the patched systemd by SHA-256 and stops if it's wrong, and an apt hook warns you before you reboot into a broken system. ([#432](https://github.com/ading2210/shimboot/issues/432), [#508](https://github.com/ading2210/shimboot/issues/508))
+- **No sound:** the 5.4 kernel needs to be told where the SOF firmware is, and that setting was taken from the wrong image. The Chromebook UCM configs are also installed, and survive upgrades. ([#518](https://github.com/ading2210/shimboot/issues/518))
+- **Random reboots to the recovery screen:** hung tasks and soft lockups no longer panic the kernel, dirty-page writeback to slow USB drives is capped, and suspend (which the kernel can't do) is disabled cleanly. ([#461](https://github.com/ading2210/shimboot/issues/461), [#423](https://github.com/ading2210/shimboot/issues/423))
+- **Chrome OS forcing an update on every boot** with the verified-mode spoof. See [below](#booting-chrome-os-through-reshimboot). ([#359](https://github.com/ading2210/shimboot/issues/359))
+- iptables ([#414](https://github.com/ading2210/shimboot/issues/414)), exFAT ([#512](https://github.com/ading2210/shimboot/issues/512)), Wi-Fi ([#487](https://github.com/ading2210/shimboot/issues/487), [#506](https://github.com/ading2210/shimboot/issues/506)), locales ([#475](https://github.com/ading2210/shimboot/issues/475)), and Steam ([#306](https://github.com/ading2210/shimboot/issues/306)).
 
-### Prerequisites:
-- If building from source, a separate Linux PC for the build process (preferably something Debian-based)
-  - WSL2 is supported if you are on Windows
-  - Github Codespaces is not supported at the moment
-  - At least 20GB of free disk space is needed on the build device
-- A USB drive that is at least 8GB in size
-  - Cheap USB 2.0 drives typically won't work well due to their slow speeds
+**A much better build**
+- **No more binwalk.** `tools/shimtool.py` reads the shim kernel's actual structure, so the build no longer breaks with binwalk 3.x. ([#353](https://github.com/ading2210/shimboot/issues/353), [#526](https://github.com/ading2210/shimboot/issues/526))
+- **About 97% less to download for the shim.** Only the two partitions that are needed are extracted while downloading, and the download stops there: about 130 MB instead of 4.3 GB. The recovery image is CRC-checked.
+- **Faster rebuilds.** Debian packages are cached between builds. In a minimal test build, the second run downloaded 30 packages instead of 265.
+- **Build anywhere.** No loop devices are needed (except for LUKS), and there's a [container build](#building-in-a-container) for Arch, Fedora and WSL.
+- Unit tests, `shellcheck`, and per-desktop release builds in CI.
 
-### Video Tutorial:
-[![thumbnail of the tutorial youtube video](https://img.youtube.com/vi/v327np19RXg/mqdefault.jpg)](https://www.youtube.com/watch?v=v327np19RXg)
+Removed: support for other boards, ARM, and the Alpine and Ubuntu rootfs options.
 
-[@blueiceyt](https://www.youtube.com/channel/UC2yMjQu-NwJSQb0tRclQMYg) made a nice [video tutorial](https://www.youtube.com/watch?v=v327np19RXg) for Shimboot. It's a lot easier to understand than the instructions on this page, and it'll cover most use cases.
+## Building
 
-### Build Instructions:
-1. Find the board name of your Chromebook. You can search for the model name on [cros.download](https://cros.download/recovery).
-2. Clone this repository and cd into it.
-3. Run `sudo ./build_complete.sh <board_name>` to download the required data and build the disk image. 
+You need about 20 GB of free space and root access. `build_complete.sh` installs its own dependencies on Debian and Ubuntu.
 
-Note: If you are building for an ARM Chromebook, you need the `qemu-user-static` and `binfmt-support` packages.
+```bash
+sudo ./build_complete.sh [option=value ...]
+```
 
-[Prebuilt images](https://github.com/ading2210/shimboot/releases) are available if you don't have a suitable device to run the build on.
+| Option | Default | Description |
+|---|---|---|
+| `desktop` | `xfce` | `xfce`, `kde`, `gnome`, `lxqt`, `mate`, `cinnamon`, `lxde`, `gnome-flashback`, or `none` |
+| `release` | `trixie` | `trixie` (Debian 13), `bookworm` (12), `forky` or `sid` (see [below](#can-i-use-debian-testing-or-unstable)) |
+| `username` / `user_passwd` | `user` / `user` | If you set a password, the first-login password prompt is skipped |
+| `hostname` | `reshimboot` | |
+| `timezone` | the build machine's | For example `America/New_York` |
+| `locale` | `en_US.UTF-8` | |
+| `luks` | off | `luks=1` encrypts the rootfs; you'll be asked for a password |
+| `autoboot` | `5` | Seconds before Debian boots automatically, `0` to always show the menu |
+| `compress_img` | off | `1` for a `.zip` (Chromebook Recovery Utility), `xz` for a smaller `.xz` |
+| `flatpak` / `i386` / `auto_expand` | on | Set to `0` to leave out Flatpak, 32-bit packages (Steam, Wine), or first-boot expansion |
+| `cache` | on | `0` to not keep Debian packages in `data/cache` between builds |
+| `shim_path` / `reco_path` | download | Use a `.bin` or `.zip` you already have |
+| `extra_ca` | none | A CA certificate to trust during the build, for networks that intercept HTTPS |
+| `quiet` | off | No progress bars, for CI logs |
+
+For example:
+
+```bash
+sudo ./build_complete.sh desktop=kde compress_img=xz timezone=Europe/Berlin
+```
+
+The finished image is `data/shimboot_dedede.bin`, with a `.sha256` checksum next to it.
+
+### Building in a container
+
+If you're not on Debian or Ubuntu (Arch, Fedora, WSL…), build inside a container instead. It takes the same options:
+
+```bash
+sudo ./build_docker.sh desktop=gnome
+```
+
+This uses Docker or Podman (rootful), and the image still ends up in `data/`.
 
 <details>
-  <summary><b>(not recommended) Alternatively, you can run each of the steps manually:</b></summary>
-  
-  1. Grab a Chrome OS RMA Shim from somewhere. Most of them have already been leaked and aren't too difficult to find.
-  2. Download a Chrome OS [recovery image](https://chromiumdash.appspot.com/serving-builds?deviceCategory=ChromeOS) for your board.
-  3. Unzip the shim and the recovery image if you have not done so already.
-  4. Run `mkdir -p data/rootfs` to create a directory to hold the rootfs.
-  5. Run `sudo ./build_rootfs.sh data/rootfs bookworm` to build the base rootfs.
-  6. Run `sudo ./patch_rootfs.sh path_to_shim path_to_reco data/rootfs` to patch the base rootfs and add any needed drivers.
-  7. Run `sudo ./build.sh image.bin path_to_shim data/rootfs` to generate a disk image at `image.bin`. 
+<summary>Running the steps by hand</summary>
+
+1. `sudo ./build_rootfs.sh data/rootfs trixie` builds the Debian rootfs.
+2. `sudo ./patch_rootfs.sh shim.bin reco.bin data/rootfs` adds the dedede kernel modules, firmware, and audio configs.
+3. `sudo ./build.sh image.bin shim.bin data/rootfs` writes the disk image.
+
+Each script prints its options with `--help`. `build_squashfs.sh` can make a compressed rootfs as well.
 </details>
 
-### Booting the Image:
-1. Obtain a shimboot image by downloading a [prebuilt one](https://github.com/ading2210/shimboot/releases) or building it yourself. 
-2. Flash the shimboot image to a USB drive or SD card. Use the [Chromebook Recovery Utility](https://chrome.google.com/webstore/detail/chromebook-recovery-utili/pocpnlppkickgojjlmhdmidojbmbodfm) or [dd](https://linux.die.net/man/1/dd) if you're on Linux.
-3. Enable developer mode on your Chromebook. If the Chromebook is enrolled, follow the instructions on the [sh1mmer website](https://sh1mmer.me) (see the "Executing on Chromebook" section).
-4. Plug the USB into your Chromebook and enter recovery mode. It should detect the USB and run the shimboot bootloader.
-5. Boot into Debian and log in with the username and password that you configured earlier. The default username/password for the prebuilt images is `user/user`.
-6. Expand the rootfs partition so that it fills up the entire disk by running `sudo expand_rootfs`.
-7. Change your own password by running `passwd user`. The root user is disabled by default.
+## Flashing and booting
 
-## FAQ:
+1. Flash the image to a USB drive or SD card:
+   - the [Chromebook Recovery Utility](https://chrome.google.com/webstore/detail/chromebook-recovery-utili/pocpnlppkickgojjlmhdmidojbmbodfm) (use the `.bin` or `.zip`), or
+   - [balenaEtcher](https://etcher.balena.io/) or Rufus (these also take `.xz`), or
+   - `sudo dd if=shimboot_dedede.bin of=/dev/sdX bs=4M oflag=direct status=progress`
+2. Enable developer mode. If your Chromebook is enrolled, follow the [sh1mmer instructions](https://sh1mmer.me).
+3. Plug in the drive and enter recovery mode (Esc + Refresh + Power).
+4. Debian boots after the countdown. Log in and follow the welcome screen.
 
-#### I want to use a different Linux distribution. How can I do that?
-Using any Linux distro is possible, provided that you apply the [proper patches](https://github.com/ading2210/chromeos-systemd) to systemd and recompile it. Most distros have some sort of bootstrapping tool that allows you to install it to a directory on your host PC. Then, you can just pass that rootfs directory into `patch_rootfs.sh` and `build.sh`.
+Use a decent USB 3 drive or SD card. Cheap USB 2 drives work, but slowly.
 
-Here is a list of distros that are supported out of the box:
-- Debian 12 (Bookworm) - This is the default.
-- Debian 13 (Trixie)
-- Debian Unstable (Sid)
-- Alpine Linux
+## Using the bootloader
 
-PRs to enable support for other distros are welcome. 
+```
+┌───────────────────────────┐
+│ reshimboot OS Selector    │
+└───────────────────────────┘
+r1.0.0 - kernel 5.4.85-22138-ga9994f5cad40
 
-Debian Sid (unstable rolling release) and Trixie (upcoming Debian 13 release) is also supported if you just want newer packages, and you can install it by passing an argument to `build_complete.sh`: 
+1) ChromeOS_ROOT-A on /dev/mmcblk1p3
+2) ChromeOS_ROOT-B on /dev/mmcblk1p5
+3) debian on /dev/sda4
+q) reboot
+s) enter a shell
+f) check and repair a filesystem
+l) view license
+type 'rescue <number>' to boot into a rescue shell
+
+booting debian in 5 seconds, press any key for the menu...
+```
+
+- **Number:** boot that system.
+- **`rescue <number>`:** get a root shell inside that system instead of starting it. Run `exec /sbin/init` to continue booting.
+- **`f`:** run a full filesystem repair (`e2fsck -fy`) on a Debian partition, including encrypted ones.
+- **`s`:** a busybox shell in the bootloader itself.
+
+## Booting Chrome OS through reshimboot
+
+Pick a `ChromeOS_ROOT` entry to boot the Chrome OS that's on the internal drive. It borrows the kernel modules from your Debian partition, and asks whether to spoof verified mode and an invalid HWID. That's useful on enrolled devices.
+
+**No more forced update loop.** With the spoof on, Chrome OS still ran `update_engine` on every boot. That put a forced "update required" screen in front of the setup screens even when nothing needed updating. Worse, if an update ever finished, Chrome OS booted *normally* afterwards and locked the device again, which undid the spoof. reshimboot now stops `update_engine` for that boot by bind-mounting over its upstart job. Nothing is written to your internal drive, and booting Chrome OS without reshimboot brings updates back.
+
+Google keeps changing how verified mode is detected, so the spoof itself may still fail on the newest Chrome OS versions.
+
+## Troubleshooting and FAQ
+
+#### Something isn't working
+Open a terminal and run `shimboot-doctor`. It checks systemd, storage, Wi-Fi, audio, graphics and more, then tells you what it can fix. Run `sudo shimboot-doctor --fix` to fix it, and include the output in bug reports.
+
+#### It won't boot any more
+At the bootloader menu, try `f` to repair the filesystem. If that doesn't help, type `rescue <number>` to get a shell and look at `journalctl -b -1`. If you see "Failed to mount API filesystems", run `sudo shimboot-doctor --fix` from the rescue shell to reinstall the patched systemd.
+
+#### Some Wi-Fi networks won't connect
+Mixed WPA2/WPA3 networks work out of the box. For a network that *only* allows WPA3, run:
 ```bash
-sudo ./build_complete.sh dedede release=unstable
+sudo nmcli connection modify "<network name>" wifi-sec.pmf required
 ```
+
+#### There's no sound
+Run `shimboot-doctor` and look at the audio section. Internal audio is the least-tested fix here, so please report what you see. A USB sound card, or a USB-to-headphone adapter (which is a sound card), always works.
+
+#### Steam or a Flatpak app says user namespaces are disabled
+`/usr/bin/bwrap` is already fixed. For the copies Steam downloads into your home directory, run `fix_bwrap`.
+
+#### How do I mount a USB stick or SD card?
+It mounts automatically in the file manager, including exFAT and NTFS.
+
+#### Can I use Debian testing or unstable?
+`release=forky` and `release=sid` are allowed, but not recommended. The patched systemd can lag behind Debian. The build stops if the right one isn't available, rather than make an image that won't boot. Newer systemd versions may also need a kernel newer than 5.4.
+
+#### How do I upgrade to a newer Debian release?
+Replace the release name in `/etc/apt/sources.list.d/*.sources` (the shimboot one too), then run `sudo apt update && sudo apt full-upgrade`. The apt hook warns you if the patched systemd isn't available for the new release; don't reboot if it does.
+
+#### Why is there no suspend?
+The shim kernel has suspend disabled, and trying to suspend could crash the Chromebook. reshimboot turns it off everywhere, and closing the lid locks the screen instead.
+
+#### I see 404 errors from `apt update`
+That's normal. The shimboot repository doesn't publish signatures or translations.
+
+## Why not a newer kernel? (kexec)
+
+A newer kernel would fix most of the limitations above, so this was investigated. **It isn't possible on dedede:**
+
+- The only way to run another kernel without firmware changes is `kexec`. The dedede shim kernel is **built without kexec** (`CONFIG_KEXEC_CORE` is off). Its image has none of kexec's own code: no `kexec_load_disabled` sysctl, no "Starting new kernel" message, no crash-kernel reservation. So `kexec_load` and `kexec_file_load` don't exist on it.
+- The kernel can't be replaced or patched either. The firmware only boots the shim kernel because it's signed by Google. The unsigned part that shimboot relies on is the root filesystem, not the kernel.
+- There's only one dedede shim, so there's no other kernel to pick.
+
+So reshimboot works around the 5.4 kernel instead (FUSE for exFAT and NTFS, legacy iptables, lzo-rle zram, and a pinned ext4 feature set). Booting a different kernel needs firmware write protection disabled, and at that point you don't need shimboot at all.
+
+## How it works
+
+Chrome OS RMA shims are signed recovery images that even enrolled Chromebooks will boot. Their kernel is verified, but [their root filesystem isn't](https://sh1mmer.me/). reshimboot keeps the signed shim kernel and replaces the root filesystem with a bootloader:
+
+```
+firmware ─► shim kernel (signed, Linux 5.4, KERN-A)
+              └─► /sbin/init on the bootloader partition (ROOT-A)
+                    └─► bootstrap.sh: menu, fsck, LUKS unlock
+                          └─► pivot_root into the Debian partition ─► patched systemd
+```
+
+| Partition | Size | Contents |
+|---|---|---|
+| 1 | 1 MB | Stateful partition that the shim expects |
+| 2 | 32 MB | The shim's signed kernel |
+| 3 | 20 MB | Bootloader: the shim's initramfs, `bootstrap.sh`, static `e2fsck` (and `cryptsetup` with LUKS) |
+| 4 | the rest | Debian, labelled `shimboot_rootfs:debian` |
+
+A few details:
+- **systemd:** the Chrome OS kernel rejects a normal systemd's early mounts, so a [patched systemd](https://github.com/ading2210/chromeos-systemd) from the shimboot apt repo is installed and pinned.
+- **Kernel modules** come from the shim.
+- **Firmware** from the shim and the recovery image goes into `/lib/firmware/updates/<kernel>`. The kernel checks that directory first, so it prefers firmware that matches it over Debian's newer files, without modifying anything dpkg owns.
+- **ext4 features** are pinned by [`mke2fs.conf`](mke2fs.conf) to what Linux 5.4 can mount read-write.
+
+## Contributing
+
+Bug reports with `shimboot-doctor` output are the most useful thing, especially for the 🧪 features.
+
+Before sending changes, run:
+
 ```bash
-sudo ./build_complete.sh dedede release=trixie
+./tools/lint.sh   # shellcheck, busybox syntax checks, and the shimtool unit tests
 ```
 
-There is also experimental support for Alpine Linux. The Alpine disk image is about half the size compared to Debian, although some applications are missing. Pass the `distro=alpine` to use it:
-```bash
-sudo ./build_complete.sh dedede distro=alpine
+| Path | What it is |
+|---|---|
+| `build_complete.sh` | Downloads everything and runs the other steps |
+| `build_rootfs.sh`, `rootfs/opt/setup_rootfs.sh` | Build and configure Debian (the second one runs inside the chroot) |
+| `patch_rootfs.sh` | Adds dedede's kernel modules, firmware, and audio configs |
+| `build.sh`, `image_utils.sh` | Write the final disk image |
+| `bootloader/` | The boot menu that runs from the shim |
+| `rootfs/` | Files copied into Debian: configs, `shimboot-doctor`, the welcome app… |
+| `tools/shimtool.py` | Reads GPT disks, Chrome OS kernels, and zip64 downloads (Python standard library only) |
+| `tests/` | Unit tests for `shimtool.py` using synthetic images |
+
+## About the AI-assisted development
+
+This fork was developed with the help of an AI coding assistant (Claude, by Anthropic), directed and reviewed by the maintainer. Here's how the work was checked:
+
+- **Research:** upstream's issues, pull requests and unreleased `dev` branch were reviewed, and the real dedede shim and recovery image were analysed. Findings such as the 5.4 kernel, the missing SOF firmware setting, the wrong WiFi firmware and the ext4 incompatibility came from those images, not from guesses.
+- **Testing:**
+  - complete builds were run from download to finished image, on Ubuntu and inside a Debian 13 container;
+  - the bootloader's menu, countdown and filesystem repair were run under the shim's own busybox, against deliberately corrupted filesystems;
+  - `shimtool.py` has unit tests;
+  - every script passes `shellcheck`.
+- **Not yet tested:** booting on real dedede hardware. The 🧪 items in [What works](#what-works) are the ones that most need confirmation.
+
+If something looks wrong, please open an issue. Hardware reports decide which of these fixes stay.
+
+## Credits and license
+
+reshimboot is licensed under the [GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.txt).
+
+- [ading2210/shimboot](https://github.com/ading2210/shimboot), the project this is forked from. Copyright (C) 2025 ading2210.
+- The [patched systemd](https://github.com/ading2210/chromeos-systemd) by ading2210, with the original fix by [@r58Playz](https://github.com/r58Playz).
+- The Chromebook audio (UCM) configs from [WeirdTreeThing/alsa-ucm-conf-cros](https://github.com/WeirdTreeThing/alsa-ucm-conf-cros) (BSD 3-Clause).
+- Upstream contributors whose work is included: [@a1g0r1thm9](https://github.com/a1g0r1thm9) (LUKS2), WifiRouterYT (bind-mounted Chrome OS modules, upstream PR #480), and hainesnoids (`set_timezone`, upstream PR #504).
+
 ```
-
-#### How can I install a desktop environment other than XFCE?
-You can pass the `desktop` argument to the `build_complete.sh` script, like this:
-```bash
-sudo ./build_complete.sh grunt desktop=lxde
-```
-The valid values for this argument are: `gnome`, `xfce`, `kde`, `lxde`, `gnome-flashback`, `cinnamon`, `mate`, and `lxqt`.
-
-#### Will this prevent me from using Chrome OS normally?
-Shimboot does not touch the internal storage at all, so you will be able to use Chrome OS as if nothing happened. However, if you are on an enterprise enrolled device, booting Chrome OS again will force a powerwash due to the attempted switch into developer mode.
-
-#### Can I unplug the USB drive while using Debian?
-By default, this is not possible. However, you can simply copy your Debian rootfs onto your internal storage by first using `fdisk` to repartition it, using `dd` to copy the partition, and `resize2fs` to have it take up the entire drive. In the future, loading the OS to RAM may be supported, but this isn't a priority at the moment. You can also just blindly copy the contents of your Shimboot USB to the internal storage without bothering to repartition:
-```bash
-#check the output of this to know what disk you're copying to and from
-fdisk -l
-
-#run this from within the shimboot bootloader
-#this assumes the usb drive is on sda and internal storage is on mmcblk1
-dd if=/dev/sda of=/dev/mmcblk1 bs=1M oflag=direct status=progress
-```
-
-#### GPU acceleration isn't working, how can I fix this?
-If your kernel version is too old, the standard Mesa drivers will fail to load. Instead, you must download and install the `mesa-amber` drivers. Run the following commands:
-```bash
-sudo apt install libglx-amber0 libegl-amber0
-echo "MESA_LOADER_DRIVER_OVERRIDE=i965" | sudo tee -a /etc/environment
-```
-You may need to change `i965` to `i915` (or `r100`/`r200` for AMD hardware), depending on what GPU you have.
-
-For ARM Chromebooks, you may have to tweak the [Xorg configuration](https://xkcd.com/963/) instead.
-
-You can also try switching between X11 and Wayland, but this requires a different desktop environment than XFCE.
-
-#### Can the rootfs be compressed to save space?
-Compressing the Debian rootfs with a squashfs is supported, and you can do this by running the regular Debian rootfs through `./build_squashfs.sh`. For example:
-```bash
-sudo ./build_rootfs.sh data/rootfs bookworm
-sudo ./build_squashfs.sh data/rootfs_compressed data/rootfs path_to_shim
-sudo ./build.sh image.bin path_to_shim data/rootfs_compressed
-```
-Any writes to the squashfs will persist, but they will not be compressed when saved. For the compression to be the most effective, consider pre-installing most of the software you use with `custom_packages=` before building the squashfs.
-
-On the regular XFCE4 image, this brings the rootfs size down to 1.2GB from 3.5GB.
-
-#### Steam doesn't work.
-Steam should be installed using the `sudo apt install steam` command, however it doesn't work out of the box due to security features in the shim kernel preventing the `bwrap` library from working. See [issue #12](https://github.com/ading2210/shimboot/issues/26#issuecomment-2151893062) for more info. 
-
-To get Steam running, install and run it normally. It will fail and show a message saying that "Steam now requires user namespaces to be enabled." Run `fix_bwrap` in your terminal, relaunch Steam, and it should be working again. 
-
-#### I broke something and the system does not boot anymore.
-If the rootfs fails to boot normally, you may use the rescue mode in the bootloader to enter a shell so you can debug and fix things. You can enter this mode by typing in `rescue <selection>` in the bootloader prompt, replacing `<selection>` with the number that is displayed for your rootfs. For example, `rescue 3` will enter rescue mode for the third boot option (usually Debian).
-
-#### I see a bunch of 404 errors when I run `apt update`.
-This is normal and completely harmless. The Shimboot package repository does not sign its packages, and it doesn't include translation metadata. This is not required for the functionality of the repo, and can be ignored.
-
-#### I want to install another desktop without building an image myself.
-You can replace the desktop environment in your existing Shimboot installation easily, using APT. For example:
-```bash
-sudo apt install task-cinnamon-desktop *xfce*- thunar- --autoremove
-```
-Replace `task-cinnamon-desktop` with the DE that you want to install (such as `task-kde-desktop`). This installs the other DE and uninstalls XFCE at the same time. Then once the installation has finished, reboot the system.
-
-#### My Chromebook is enrolled and it doesn't recognize the USB drive.
-Chromebooks that were manufactured after early 2023 contain a patch in the read-only firmware that prevents Shimboot from booting, even if you switch to dev mode. This only affects enrolled devices, and there is no workaround if your device is affected. 
-
-#### How can I encrypt my Shimboot USB?
-You can encrypt the root partition using the `luks` option when building the image. For instance:
-```bash
-sudo ./build_complete.sh corsola luks=1
-```
-The script will prompt you to set an encryption password. When booting the encrypted image, the Shimboot bootloader will prompt you to enter this password.
-
-#### I can't connect to some wifi networks.
-You may have to run these commands in order to connect to certain networks:
-```
-$ nmcli connection edit <your connection name>
-> set 802-11-wireless-security.pmf disable
-> save
-> activate
-```
-
-## Copyright:
-Shimboot is licensed under the [GNU GPL v3](https://www.gnu.org/licenses/gpl-3.0.txt). 
-
-Unless otherwise indicated, all code has been written by me, [ading2210](https://github.com/ading2210).
-
-Other contributors:
-- [@a1g0r1thm9](https://github.com/a1g0r1thm9) - LUKS2 encryption feature ([PR #300](https://github.com/ading2210/shimboot/pull/300))
-
-### Copyright Notice:
-```
-ading2210/shimboot: Boot desktop Linux from a Chrome OS RMA shim.
+reshimboot: a modernized shimboot for dedede Chromebooks.
+Based on ading2210/shimboot: Boot desktop Linux from a Chrome OS RMA shim.
 Copyright (C) 2025 ading2210
+Copyright (C) 2026 reshimboot contributors
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by

@@ -1,0 +1,3 @@
+// re-apply the Chromebook audio configs when alsa-ucm-conf is upgraded, and
+// warn when an upgrade replaces the patched systemd (the system would not boot)
+DPkg::Post-Invoke { "if [ -x /usr/local/bin/shimboot-apt-hook ]; then /usr/local/bin/shimboot-apt-hook || true; fi"; };

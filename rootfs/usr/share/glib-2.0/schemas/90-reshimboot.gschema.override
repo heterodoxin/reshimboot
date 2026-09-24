@@ -1,0 +1,5 @@
+# GNOME touchpad defaults that match Chrome OS: tap to click, and a two
+# finger click for right click
+[org.gnome.desktop.peripherals.touchpad]
+tap-to-click=true
+click-method='fingers'

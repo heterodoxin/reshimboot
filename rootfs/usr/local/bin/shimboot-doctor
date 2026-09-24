@@ -1,0 +1,216 @@
+#!/bin/bash
+
+#check for common problems on a reshimboot install
+#  shimboot-doctor        report problems (paste this into bug reports)
+#  sudo shimboot-doctor --fix   also repair the ones that can be fixed automatically
+
+fix_mode=""
+if [ "$1" = "--fix" ]; then
+  if [ "$EUID" -ne 0 ]; then
+    exec sudo "$0" --fix
+  fi
+  fix_mode="1"
+elif [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+  echo "Usage: shimboot-doctor [--fix]"
+  echo "  --fix   repair the problems that can be fixed automatically (needs sudo)"
+  exit 0
+fi
+
+fixes=()
+fix_names=()
+ok() { printf '\033[1;32m[ ok ]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
+bad() { printf '\033[1;31m[fail]\033[0m %s\n' "$*"; }
+info() { printf '       %s\n' "$*"; }
+#queue a repair for --fix: add_fix "description" "command"
+add_fix() {
+  fix_names+=("$1")
+  fixes+=("$2")
+}
+
+dmesg_log="$(dmesg 2>/dev/null || sudo -n dmesg 2>/dev/null)"
+
+check_system() {
+  echo "== reshimboot"
+  local version="unknown"
+  if [ -f /bootloader/opt/.shimboot_version ]; then
+    version="$(cat /bootloader/opt/.shimboot_version)"
+    if [ -f /bootloader/opt/.shimboot_version_dev ]; then
+      version+="-dev-$(cat /bootloader/opt/.shimboot_version_dev)"
+    fi
+  fi
+  info "version: $version"
+  info "kernel: $(uname -r)"
+  info "os: $(. /etc/os-release && echo "$PRETTY_NAME")"
+  info "model: $(cat /sys/class/dmi/id/product_name 2>/dev/null || echo unknown)"
+  info "memory: $(free -h | awk '/^Mem:/ {print $2}')"
+  if [ ! -d "/lib/modules/$(uname -r)" ]; then
+    bad "there are no kernel modules for $(uname -r), wifi and audio will not work. rebuild or reflash the image."
+  fi
+}
+
+check_systemd() {
+  echo "== systemd"
+  local systemd_version
+  systemd_version="$(dpkg-query -W -f='${Version}' systemd 2>/dev/null)"
+  if ! ls /var/lib/apt/lists/*shimboot*_Packages > /dev/null 2>&1; then
+    warn "systemd $systemd_version (run 'sudo apt update' so this can be checked)"
+  elif apt-cache madison systemd 2>/dev/null | grep shimboot | grep -qF " $systemd_version "; then
+    ok "systemd $systemd_version is the patched version"
+  else
+    bad "systemd $systemd_version is not from the shimboot repo, the system may not boot again"
+    add_fix "reinstall the patched systemd" \
+      "apt-get update && apt-get install -y --reinstall --allow-downgrades systemd systemd-sysv libsystemd-shared libsystemd0"
+  fi
+
+  local failed_units
+  failed_units="$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+  if [ "$failed_units" ]; then
+    warn "failed units: $failed_units"
+    info "see why with: journalctl -b -u <unit name>"
+  else
+    ok "no failed units"
+  fi
+}
+
+check_storage() {
+  echo "== storage"
+  local root_size_mb root_use
+  root_size_mb="$(df -BM / | tail -n1 | awk '{print $2}' | tr -d 'M')"
+  root_use="$(df -BM / | tail -n1 | awk '{print $5}')"
+  info "rootfs: $(findmnt -n -o SOURCE /), ${root_size_mb}MiB, $root_use used"
+  if [ -f /var/lib/reshimboot/rootfs-expanded ]; then
+    ok "rootfs has been expanded"
+  elif [ "$root_size_mb" -lt 7000 ]; then
+    warn "rootfs has not been expanded to fill the drive"
+    add_fix "expand the rootfs to fill the drive" "expand_rootfs --auto"
+  fi
+  if grep -q zram /proc/swaps; then
+    ok "zram swap: $(awk '/zram/ {printf "%d MiB", $3/1024}' /proc/swaps)"
+  else
+    warn "zram swap is not active"
+    add_fix "restart zram swap" "systemctl restart zramswap.service"
+  fi
+}
+
+check_wifi() {
+  echo "== wifi"
+  if ip -o link show 2>/dev/null | grep -q ": wl"; then
+    ok "wifi interface: $(ip -o link show | awk -F': ' '/: wl/ {print $2}' | head -n1)"
+  else
+    bad "no wifi interface found"
+  fi
+  local fw_line
+  fw_line="$(echo "$dmesg_log" | grep -E "iwlwifi.*loaded firmware version|rtw.*Firmware version" | tail -n1)"
+  if [ "$fw_line" ]; then
+    info "${fw_line#*] }"
+  elif echo "$dmesg_log" | grep -qE "iwlwifi.*(no suitable firmware|failed to load)"; then
+    bad "the wifi firmware could not be loaded"
+  fi
+}
+
+check_audio() {
+  echo "== audio"
+  if [ -f /proc/asound/cards ] && grep -q "\[" /proc/asound/cards; then
+    while read -r line; do info "$line"; done < <(grep "\[" /proc/asound/cards)
+    if grep -q "sof-" /proc/asound/cards; then
+      ok "the SOF sound card is present"
+    fi
+  else
+    bad "no sound cards found"
+  fi
+  #missing or replaced files both count, "Only in" alsa/ucm2 is just debian's own configs
+  if [ -d /usr/share/reshimboot/ucm2 ] && ! diff -rq /usr/share/reshimboot/ucm2 /usr/share/alsa/ucm2 2>/dev/null \
+     | grep -qE "^(Only in /usr/share/reshimboot|Files /usr/share/reshimboot)"; then
+    ok "the chromebook audio configs are installed"
+  elif [ -d /usr/share/reshimboot/ucm2 ]; then
+    warn "the chromebook audio configs were overwritten by a package upgrade"
+    add_fix "reinstall the chromebook audio configs" "cp -a /usr/share/reshimboot/ucm2/. /usr/share/alsa/ucm2/"
+  fi
+  local sof_errors
+  sof_errors="$(echo "$dmesg_log" | grep -iE "sof.*(error|failed)" | tail -n3)"
+  if [ "$sof_errors" ]; then
+    warn "SOF errors in the kernel log:"
+    while read -r line; do info "${line#*] }"; done <<< "$sof_errors"
+  fi
+}
+
+check_graphics() {
+  echo "== graphics"
+  local renderer
+  renderer="$(glxinfo -B 2>/dev/null | awk -F': ' '/OpenGL renderer/ {print $2}')"
+  if [ "$renderer" ]; then
+    info "renderer: $renderer"
+    if echo "$renderer" | grep -qi llvmpipe; then
+      warn "3D acceleration is not working (software rendering)"
+    else
+      ok "3D acceleration is working"
+    fi
+  fi
+  info "session: ${XDG_SESSION_TYPE:-unknown}"
+}
+
+check_sandboxing() {
+  echo "== apps"
+  if command -v iptables > /dev/null; then
+    if iptables --version 2>/dev/null | grep -q legacy; then
+      ok "iptables uses the legacy backend (the shim kernel has no nf_tables)"
+    else
+      bad "iptables uses nf_tables, which the shim kernel does not support"
+      add_fix "switch iptables to the legacy backend" \
+        "for t in iptables ip6tables arptables ebtables; do [ -x /usr/sbin/\$t-legacy ] && update-alternatives --set \$t /usr/sbin/\$t-legacy; done; true"
+    fi
+  fi
+  if [ -e /usr/bin/bwrap ]; then
+    if [ -u /usr/bin/bwrap ]; then
+      ok "bubblewrap is setuid (needed for flatpak and steam)"
+    else
+      bad "bubblewrap is not setuid, so flatpak and steam cannot start their sandboxes"
+      add_fix "make bubblewrap setuid" \
+        "dpkg-statoverride --list /usr/bin/bwrap > /dev/null || dpkg-statoverride --update --add root root 4755 /usr/bin/bwrap"
+    fi
+  fi
+  local user_home="${SUDO_USER:+$(getent passwd "$SUDO_USER" | cut -d: -f6)}"
+  if [ -f "${user_home:-$HOME}/.config/reshimboot/default-password" ]; then
+    warn "you are still using the default password, run 'passwd' to change it"
+  fi
+}
+
+run_checks() {
+  fixes=()
+  fix_names=()
+  check_system
+  check_systemd
+  check_storage
+  check_wifi
+  check_audio
+  check_graphics
+  check_sandboxing
+}
+
+run_checks
+
+if [ "${#fixes[@]}" -eq 0 ]; then
+  exit 0
+fi
+echo
+if [ ! "$fix_mode" ]; then
+  echo "${#fixes[@]} problem(s) can be fixed automatically. Run 'sudo shimboot-doctor --fix' to fix them:"
+  for name in "${fix_names[@]}"; do
+    info "- $name"
+  done
+  exit 1
+fi
+
+echo "== fixing"
+for i in "${!fixes[@]}"; do
+  echo ">> ${fix_names[$i]}"
+  if bash -c "${fixes[$i]}"; then
+    ok "${fix_names[$i]}"
+  else
+    bad "could not ${fix_names[$i]}"
+  fi
+done
+echo
+echo "== checking again"
+run_checks

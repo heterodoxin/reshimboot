@@ -1,0 +1,6 @@
+# common.sh, image_utils.sh and shim_utils.sh are sourced by the entry scripts,
+# so variables and functions they define look "unused" or "unassigned" to
+# shellcheck when it lints each file on its own. These two checks are the
+# source-boundary noise that comes from that; everything else stays on.
+disable=SC2034
+disable=SC2154

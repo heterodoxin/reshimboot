@@ -1,49 +1,77 @@
 #!/bin/bash
 
-#this script automatically expands the root filesystem
+#this script grows the root partition and filesystem to fill the rest of the drive
+#run with --auto (or -y) to skip the confirmation prompt
 
 set -e
 if [ "$DEBUG" ]; then
   set -x
 fi
 
+auto=""
+if [ "$1" = "--auto" ] || [ "$1" = "-y" ]; then
+  auto="1"
+fi
+marker="/var/lib/reshimboot/rootfs-expanded"
+
 if [ "$EUID" -ne 0 ]; then
   echo "This needs to be run as root."
   exit 1
 fi
 
-root_dev="$(findmnt -T / -no SOURCE)"
-luks="$(echo "$root_dev" | grep "/dev/mapper" || true)"
+mark_done() {
+  mkdir -p "$(dirname "$marker")"
+  touch "$marker"
+}
 
-if [ "$luks" ]; then
-  echo "Note: Root partition is encrypted."
-  kname_dev="$(lsblk --list --noheadings --paths --output KNAME "$root_dev")"
-  kname="$(basename "$kname_dev")"
-  part_dev="/dev/$(basename "/sys/class/block/$kname/slaves/"*)"
+root_dev="$(findmnt -n -o SOURCE /)"
+luks=""
+if [ "$(lsblk -no TYPE "$root_dev" 2>/dev/null)" = "crypt" ]; then
+  luks="1"
+  part_dev="/dev/$(basename "$(ls -d /sys/class/block/"$(basename "$(realpath "$root_dev")")"/slaves/* | head -n1)")"
 else
   part_dev="$root_dev"
 fi
 
-disk_dev="$(lsblk --list --noheadings --paths --output PKNAME "$part_dev" | head -n1)"
-part_num="$(echo "${part_dev#$disk_dev}" | tr -d 'p')"
+part_name="$(basename "$(realpath "$part_dev")")"
+if [ ! -f "/sys/class/block/$part_name/partition" ]; then
+  echo "Could not detect the root partition ($part_dev)."
+  exit 1
+fi
+part_num="$(cat "/sys/class/block/$part_name/partition")"
+disk_dev="/dev/$(lsblk -no PKNAME "$part_dev" | head -n1)"
 
-echo "Automatically detected root filesystem:"
-fdisk -l "$disk_dev" 2>/dev/null | grep "${disk_dev}:" -A 1
-echo
-echo "Automatically detected root partition:"
-fdisk -l "$disk_dev" 2>/dev/null | grep "${part_dev}"
-echo
-read -p "Press enter to continue, or ctr+c to cancel. "
+if [ "$auto" ] && [ "$luks" ]; then
+  #resizing luks needs the password, so this has to be done by hand
+  echo "The root partition is encrypted, run 'sudo expand_rootfs' to expand it."
+  mark_done
+  exit 0
+fi
 
-echo
+if [ ! "$auto" ]; then
+  echo "Automatically detected root filesystem:"
+  fdisk -l "$disk_dev" 2>/dev/null | grep "${disk_dev}:" -A 1
+  echo
+  echo "Automatically detected root partition:"
+  fdisk -l "$disk_dev" 2>/dev/null | grep "${part_dev}"
+  if [ "$luks" ]; then
+    echo "Note: the root partition is encrypted."
+  fi
+  echo
+  read -rp "Press enter to continue, or ctrl+c to cancel. "
+  echo
+fi
+
 echo "Before:"
 df -h /
 
 echo
 echo "Expanding the partition and filesystem..."
+#growpart exits with 1 when there is nothing to do
 growpart "$disk_dev" "$part_num" || true
 if [ "$luks" ]; then
-  /bootloader/bin/cryptsetup resize "$root_dev"
+  cryptsetup_bin="$(command -v cryptsetup || echo /bootloader/bin/cryptsetup)"
+  "$cryptsetup_bin" resize "$root_dev"
 fi
 resize2fs "$root_dev" || true
 
@@ -51,5 +79,6 @@ echo
 echo "After:"
 df -h /
 
+mark_done
 echo
 echo "Done expanding the root filesystem."

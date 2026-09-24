@@ -1,25 +1,59 @@
 name: build-image
-run-name: Build the shimboot disk image for all boards
-on: [push]
+run-name: Build reshimboot for dedede
+
+on:
+  push:
+    #a full image build takes a while, so skip it for documentation changes
+    paths-ignore:
+      - '**.md'
+      - 'website/**'
+      - '.github/ISSUE_TEMPLATE/**'
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Debian release"
+        default: "trixie"
+        type: choice
+        options: [trixie, bookworm, forky]
+      desktop:
+        description: "Desktop environment"
+        default: "xfce"
+        type: choice
+        options: [xfce, kde, gnome, lxqt, mate, cinnamon, lxde, none]
+
+#a newer push makes the build of an older commit pointless
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: download repo
+        uses: actions/checkout@v4
+
+      - name: install tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck python3 cpio
+
+      - name: lint and unit tests
+        run: ./tools/lint.sh
+
   build:
+    needs: lint
     permissions:
       contents: write
-
-    strategy: 
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
       matrix:
-        board: [dedede, octopus, coral, grunt, nissa, zork, corsola, jacuzzi, hatch, snappy, hana]
-
-    runs-on: ubuntu-latest
+        #tagged releases get an image for each of the main desktops,
+        #everything else builds only the requested (or default) one
+        desktop: ${{ fromJSON(startsWith(github.ref, 'refs/tags/') && '["xfce", "kde", "gnome"]' || format('["{0}"]', github.event.inputs.desktop || 'xfce')) }}
     steps:
-      - name: remove snap
-        uses: ading2210/gh-actions-remove-snap@v1
-        with:
-          disable_man_db: 'true'
-
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
+      #pinned fork, see easimon/maximize-build-space#58 (same fix as upstream shimboot)
+      - name: maximize build space
+        uses: smallprogram/maximize-build-space@16007771e4642069097fc3e7444638474e5db178
         with:
           root-reserve-mb: 4096
           swap-size-mb: 1024
@@ -27,25 +61,47 @@ jobs:
           remove-android: 'true'
           remove-haskell: 'true'
 
+      #snapd randomly kills the runner during the build (same fix as upstream shimboot)
+      - name: remove snap
+        uses: ading2210/gh-actions-remove-snap@v1
+        with:
+          disable_man_db: 'true'
+
       - name: download repo
         uses: actions/checkout@v4
-      
-      - name: run build
-        run: |
-          sudo apt-get update
-          sudo apt-get upgrade -y
-          sudo DEBUG=1 ./build_complete.sh ${{ matrix.board }} compress_img=1 quiet=1
 
-      - name: upload img
+      #/ only has 4GB left after the step above, so keep temporary files in the workspace
+      - name: run build
+        env:
+          TMPDIR: ${{ github.workspace }}/data/tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          sudo apt-get update
+          sudo --preserve-env=TMPDIR DEBUG=1 ./build_complete.sh \
+            compress_img=xz quiet=1 cache=0 \
+            release=${{ github.event.inputs.release || 'trixie' }} \
+            desktop=${{ matrix.desktop }}
+
+      - name: name the image after the desktop
+        run: |
+          cd data
+          sudo mv shimboot_dedede.bin.xz reshimboot_dedede_${{ matrix.desktop }}.bin.xz
+          sudo sh -c 'sha256sum reshimboot_dedede_${{ matrix.desktop }}.bin.xz > reshimboot_dedede_${{ matrix.desktop }}.bin.xz.sha256'
+
+      - name: upload image
         uses: actions/upload-artifact@v4
         with:
-          name: shimboot_${{ matrix.board }}
-          path: data/shimboot_${{ matrix.board }}.bin
-          compression-level: 7
-  
+          name: reshimboot_dedede_${{ matrix.desktop }}
+          path: |
+            data/reshimboot_dedede_${{ matrix.desktop }}.bin.xz
+            data/reshimboot_dedede_${{ matrix.desktop }}.bin.xz.sha256
+          compression-level: 0
+
       - name: create release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           draft: true
-          files: data/shimboot_${{ matrix.board }}.zip
+          files: |
+            data/reshimboot_dedede_${{ matrix.desktop }}.bin.xz
+            data/reshimboot_dedede_${{ matrix.desktop }}.bin.xz.sha256

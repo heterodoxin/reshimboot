@@ -1,0 +1,12 @@
+[Unit]
+Description=Grow the root filesystem to fill the drive
+ConditionPathExists=!/var/lib/reshimboot/rootfs-expanded
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/expand_rootfs --auto
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
