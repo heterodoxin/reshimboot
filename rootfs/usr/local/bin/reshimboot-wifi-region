@@ -1,0 +1,94 @@
+#!/bin/bash
+
+#set the wifi regulatory domain (country) so that 5GHz channels can be used.
+#
+#without a country, linux uses the "world" domain, where most 5GHz channels
+#may only be scanned passively or not used at all, so 5GHz networks are
+#missing or won't connect. chrome os sets the country from the "region" in the
+#chromebook's VPD, and this does the same. the country is picked from:
+#  1. /etc/reshimboot/wifi-country, if you create it (for example "US")
+#  2. the region in the chromebook's VPD
+#  3. the system timezone
+#
+#  reshimboot-wifi-region          set the country (run at boot)
+#  reshimboot-wifi-region --show   print the country that would be used
+
+config_file="/etc/reshimboot/wifi-country"
+vpd_region="/sys/firmware/vpd/ro/region"
+modprobe_conf="/etc/modprobe.d/reshimboot-wifi-region.conf"
+
+valid_country() {
+  [[ "$1" =~ ^[A-Z]{2}$ ]] && [ "$1" != "00" ]
+}
+
+#vpd regions look like "us", "gb", "ca.hybrid", "latam-es-419" or "nordic"
+country_from_vpd() {
+  [ -r "$vpd_region" ] || return 1
+  local region
+  region="$(tr -d '\0\n' < "$vpd_region" | tr '[:upper:]' '[:lower:]')"
+  case "$region" in
+    nordic*) echo "SE" ;;
+    latam*|"") return 1 ;;
+    *)
+      region="${region%%[.-]*}"
+      region="${region^^}"
+      #the uk is "GB" in the regulatory database
+      [ "$region" = "UK" ] && region="GB"
+      valid_country "$region" && echo "$region"
+      ;;
+  esac
+}
+
+country_from_timezone() {
+  local tz
+  tz="$(timedatectl show -p Timezone --value 2>/dev/null)"
+  [ "$tz" ] || tz="$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')"
+  [ "$tz" ] || return 1
+  awk -v tz="$tz" '$1 !~ /^#/ && $3 == tz {print $1; exit}' /usr/share/zoneinfo/zone.tab 2>/dev/null
+}
+
+pick_country() {
+  local country=""
+  if [ -f "$config_file" ]; then
+    country="$(tr -d '[:space:]' < "$config_file" | tr '[:lower:]' '[:upper:]')"
+    if valid_country "$country"; then
+      echo "$country config"
+      return
+    fi
+  fi
+  country="$(country_from_vpd)"
+  if valid_country "$country"; then
+    echo "$country vpd"
+    return
+  fi
+  country="$(country_from_timezone)"
+  if valid_country "$country"; then
+    echo "$country timezone"
+    return
+  fi
+  return 1
+}
+
+if ! result="$(pick_country)"; then
+  echo "could not determine the wifi country, create $config_file with a country code such as US" >&2
+  #not an error at boot, wifi still works on the channels the world domain allows
+  [ "$1" = "--show" ] && exit 1
+  exit 0
+fi
+country="${result% *}"
+source="${result#* }"
+
+if [ "$1" = "--show" ]; then
+  echo "$country (from the $source)"
+  exit 0
+fi
+
+#apply it now, and also when cfg80211 is loaded on the next boot, so that the
+#wifi driver starts with the right channels
+modprobe cfg80211 2>/dev/null
+iw reg set "$country"
+line="options cfg80211 ieee80211_regdom=$country"
+if [ "$(cat "$modprobe_conf" 2>/dev/null)" != "$line" ]; then
+  echo "$line" > "$modprobe_conf"
+fi
+echo "wifi country set to $country (from the $source)"

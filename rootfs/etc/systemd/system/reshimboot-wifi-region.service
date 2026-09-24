@@ -1,0 +1,12 @@
+[Unit]
+Description=Set the wifi country so that 5GHz channels work
+Before=NetworkManager.service
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/reshimboot-wifi-region
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -153,6 +153,16 @@ check_wifi() {
   if command -v rfkill > /dev/null && rfkill list wifi 2>/dev/null | grep -q "Hard blocked: yes"; then
     bad "wifi is hard blocked, check for a wifi switch or key"
   fi
+  #without a country, most 5GHz channels are passive or disabled
+  local reg_country
+  reg_country="$(iw reg get 2>/dev/null | awk '/^global/ {g=1} g && /^country/ {print substr($2, 1, 2); exit}')"
+  if [ "$reg_country" ] && [ "$reg_country" != "00" ]; then
+    ok "wifi country: $reg_country (5GHz channels enabled)"
+  elif command -v iw > /dev/null; then
+    warn "no wifi country is set, so 5GHz networks may be missing"
+    info "set it with: echo US | sudo tee /etc/reshimboot/wifi-country (use your country code)"
+    add_fix "set the wifi country" "systemctl enable reshimboot-wifi-region.service; /usr/local/bin/reshimboot-wifi-region"
+  fi
   if ! systemctl is-active --quiet NetworkManager 2>/dev/null; then
     bad "NetworkManager is not running"
     add_fix "start NetworkManager" "systemctl enable --now NetworkManager"

@@ -6,23 +6,31 @@
 #verified chrome os would have, and passes everything else to the real one.
 
 crossystem_old=/tmp/crossystem_old
-#the bootloader sets this to 1 when the invalid hwid spoof is chosen
+#the bootloader sets these to 1 for the spoofs that were chosen
+spoof_verified=0
 invalid_hwid=0
 
-declare -A crossystem_dict=(
-  ["cros_debug"]="1"
-  ["dev_boot_legacy"]="0"
-  ["dev_boot_signed_only"]="1"
-  ["devsw_boot"]="0"
-  ["devsw_cur"]="0"
-  ["block_devmode"]="1"
-  ["mainfw_act"]="A"
-  ["mainfw_type"]="normal"
-  ["recovery_reason"]="0"
-  ["recovery_request"]="0"
-  ["recoverysw_boot"]="0"
-  ["recoverysw_cur"]="0"
-)
+declare -A crossystem_dict=()
+
+#the values of a chromebook that booted normally with os verification on.
+#cros_debug is 0 on a verified system, and chrome os treats 1 as a
+#developer system (see is_developer_end_user).
+if [ "$spoof_verified" = "1" ]; then
+  crossystem_dict=(
+    ["cros_debug"]="0"
+    ["dev_boot_legacy"]="0"
+    ["dev_boot_signed_only"]="1"
+    ["devsw_boot"]="0"
+    ["devsw_cur"]="0"
+    ["block_devmode"]="1"
+    ["mainfw_act"]="A"
+    ["mainfw_type"]="normal"
+    ["recovery_reason"]="0"
+    ["recovery_request"]="0"
+    ["recoverysw_boot"]="0"
+    ["recoverysw_cur"]="0"
+  )
+fi
 
 #an invalid hwid stops enrollment. this replaces the block_devmode spoof,
 #which is the same behavior as the original shimboot.

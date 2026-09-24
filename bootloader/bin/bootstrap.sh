@@ -619,9 +619,14 @@ boot_chromeos() {
     mount -o bind /opt/update-engine.conf /newroot/etc/init/update-engine.conf
   fi
 
-  if [ "$use_crossystem" = "y" ]; then
+  #either spoof works on its own. the invalid hwid used to be silently
+  #ignored unless the verified mode spoof was chosen as well.
+  if [ "$use_crossystem" = "y" ] || [ "$invalid_hwid" = "y" ]; then
     echo "patching crossystem"
     cp /opt/crossystem /newroot/tmp/crossystem
+    if [ "$use_crossystem" = "y" ]; then
+      sed -i 's/^spoof_verified=0$/spoof_verified=1/' /newroot/tmp/crossystem
+    fi
     if [ "$invalid_hwid" = "y" ]; then
       sed -i 's/^invalid_hwid=0$/invalid_hwid=1/' /newroot/tmp/crossystem
     fi

@@ -1,0 +1,8 @@
+Settings for reshimboot.
+
+wifi-country
+    A two letter country code, such as US or DE. It sets the wifi
+    regulatory domain, which decides the 5GHz channels that can be used.
+    Without this file, the country comes from the Chromebook's VPD
+    (the region set at the factory), or from the timezone.
+    Apply a change with: sudo reshimboot-wifi-region

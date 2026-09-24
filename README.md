@@ -58,7 +58,7 @@ dedede's shim runs **Linux 5.4.85**, and that can't be changed (see [kexec](#why
 |---|---|---|---|
 | Desktop (X11 / Wayland) | ✅ | ✅ | KDE Plasma by default; GNOME, XFCE and others available |
 | 3D acceleration | ✅ | ✅ | Intel Gen 11 (Jasper Lake) |
-| Wi-Fi: Intel AX201 / 9560, Realtek RTL8822CE | ✅ | ✅ | Better defaults for WPA2/WPA3 networks |
+| Wi-Fi: Intel AX201 / 9560, Realtek RTL8822CE | ✅ | ✅ | 5 GHz enabled by setting the Wi-Fi country; better WPA2/WPA3 defaults |
 | Wi-Fi: Realtek RTL8852BE (some newer models) | ❌ | ❌ | No driver in the 5.4 kernel, [use USB](#wi-fi-doesnt-work) |
 | Bluetooth | ✅ | ✅ | |
 | Touchscreen, touchpad, webcam, backlight | ✅ | ✅ | Tap to click and two-finger right click like Chrome OS |
@@ -207,9 +207,14 @@ Pick a `ChromeOS_ROOT` entry to boot the Chrome OS that's on the internal drive.
 
 **No more forced update loop.** With the spoof on, Chrome OS still ran `update_engine` on every boot. That put a forced "update required" screen in front of the setup screens even when nothing needed updating. Worse, if an update ever finished, Chrome OS booted *normally* afterwards and locked the device again, which undid the spoof. reshimboot now stops `update_engine` for that boot by bind-mounting over its upstart job. Nothing is written to your internal drive, and booting Chrome OS without reshimboot brings updates back. This can't help if your school sets a minimum Chrome OS version that the `(current)` copy is older than; then the update-required screen comes from policy, and the only fix is to update Chrome OS normally.
 
+**The two spoofs work separately.** Before, the invalid HWID was silently ignored unless verified mode was spoofed as well. The verified mode spoof now also reports `cros_debug=0`, like a Chromebook with OS verification on; shimboot reported `1`, which Chrome OS treats as a developer system. The catch is that crosh's `shell` command isn't available with the verified-mode spoof.
+
 **Known limits on recent Chrome OS versions**, found by examining the current dedede recovery image (R152):
 - Early startup (`chromeos_startup`) now reads the firmware state through `libcrossystem` directly, not the `crossystem` command. It sees the real recovery-mode boot, whatever the spoof says. The spoof still covers Chrome and the scripts that run `crossystem`.
 - `chromeos_startup` now sets up the encrypted stateful partition itself, without running `mount-encrypted`. So the `--unsafe` persistence workaround from shimboot no longer takes effect, and Chrome OS data may not survive between shimboot sessions.
+- The shim's kernel command line contains `cros_factory_install`, which the internal Chrome OS sees in `/proc/cmdline`. `chromeos_startup` checks for it. For the stateful mount it only matters on test images, but it is also checked in one other place, so the boot still looks different from a normal one.
+- Chrome OS R152 is built for kernel 6.1, and here it runs on the shim's 5.4 kernel. Parts of Chrome OS that need newer kernel features can fail in ways shimboot can't fix.
+- Sandboxed Chrome OS services with a private `/tmp` can't reach the real `crossystem`. They still get the spoofed values, but other values fail for them.
 
 Google keeps changing how verified mode is detected, so the spoof itself may still fail on the newest Chrome OS versions.
 
@@ -226,6 +231,13 @@ Run `shimboot-doctor` and look at the Wi-Fi section.
 - If it says your card **has no driver in the shim kernel**, your model has a Realtek RTL8852BE, which Linux 5.4 doesn't support. Since the kernel can't be replaced (see [kexec](#why-not-a-newer-kernel-kexec)), use a USB Wi-Fi adapter, a USB Ethernet adapter, or USB tethering from a phone. Adapters that work with Linux out of the box (for example ones with Realtek RTL8188/RTL8192/RTL8812 chips) are the safest choice.
 - If Wi-Fi is switched off or the firmware failed to load, `sudo shimboot-doctor --fix` turns it back on or reinstalls the firmware.
 - Intel AX201 and 9560 cards (most dedede models) and the Realtek RTL8822CE are supported. Please open an issue with the `shimboot-doctor` output if one of these doesn't work.
+
+#### 5 GHz networks are missing or won't connect
+Linux only allows most 5 GHz channels once it knows which country it's in. Without one, it uses a restrictive "world" setting where 5 GHz networks often don't show up. reshimboot sets the country at every boot, the same way Chrome OS does: from the region stored in the Chromebook's firmware (VPD), or from your timezone if that doesn't work. Check it with `shimboot-doctor` or `reshimboot-wifi-region --show`. To set it yourself:
+```bash
+echo US | sudo tee /etc/reshimboot/wifi-country   # your two letter country code
+sudo reshimboot-wifi-region
+```
 
 #### Some Wi-Fi networks won't connect
 Mixed WPA2/WPA3 networks work out of the box. For a network that *only* allows WPA3, run:

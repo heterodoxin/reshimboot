@@ -24,6 +24,9 @@ userland. It was developed with AI assistance; see the README.
 - The menu shows the Chrome OS version on ROOT-A and ROOT-B and marks the one
   a normal boot uses as `(current)`. It warns before booting the older copy,
   which would make Chrome OS install the same update again.
+- The invalid HWID spoof works on its own. It used to be silently ignored
+  unless the verified mode spoof was chosen too. The verified mode spoof
+  reports `cros_debug=0` like a real verified Chromebook, instead of 1.
 - The spoofed `crossystem` was rewritten in plain bash. It is more than 10 times
   faster, parses values with spaces, quotes, `=` or `#` correctly, runs each
   `set` only once, and passes unknown keys to the real `crossystem`.
@@ -72,6 +75,10 @@ userland. It was developed with AI assistance; see the README.
   rootfs expansion).
 - An apt hook that warns before you reboot into an unpatched systemd.
 - `set_timezone`, and first-boot rootfs expansion.
+- `reshimboot-wifi-region` sets the Wi-Fi country at boot from the
+  Chromebook's VPD region (like Chrome OS does), the timezone, or
+  `/etc/reshimboot/wifi-country`. Without a country, Linux uses the "world"
+  regulatory domain and most 5 GHz channels are unusable.
 
 ### Build system
 

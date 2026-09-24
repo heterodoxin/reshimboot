@@ -464,7 +464,7 @@ unit_exists() {
 
 enable_services() {
   print_step "enabling services"
-  systemctl enable kill-frecon.service
+  systemctl enable kill-frecon.service reshimboot-wifi-region.service
   local unit
   for unit in NetworkManager.service systemd-resolved.service systemd-timesyncd.service \
               zramswap.service fstrim.timer bluetooth.service; do
