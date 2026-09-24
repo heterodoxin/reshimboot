@@ -56,14 +56,22 @@ jobs:
         with:
           disable_man_db: 'true'
 
+      #pinned fork, see easimon/maximize-build-space#58 (same fix as upstream shimboot)
       - name: maximize build space
-        uses: easimon/maximize-build-space@master
+        uses: smallprogram/maximize-build-space@16007771e4642069097fc3e7444638474e5db178
         with:
           root-reserve-mb: 4096
           swap-size-mb: 1024
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
+
+      #snapd can come back after the step above and randomly kill the runner
+      #during the build (same fix as upstream shimboot)
+      - name: remove snap again
+        uses: ading2210/gh-actions-remove-snap@v1
+        with:
+          disable_man_db: 'true'
 
       - name: download repo
         uses: actions/checkout@v4
