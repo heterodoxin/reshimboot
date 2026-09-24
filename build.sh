@@ -87,6 +87,21 @@ print_info "patching initramfs"
 patch_initramfs "$initramfs_dir"
 echo "AUTOBOOT_TIMEOUT=$autoboot" > "$initramfs_dir/opt/shimboot.conf"
 
+#a static e2fsck lets the bootloader check the rootfs before mounting it
+e2fsck_static=""
+for candidate in "$rootfs_dir/usr/sbin/e2fsck.static" "$rootfs_dir/sbin/e2fsck.static"; do
+  if [ -f "$candidate" ]; then
+    e2fsck_static="$candidate"
+    break
+  fi
+done
+if [ "$e2fsck_static" ]; then
+  cp "$e2fsck_static" "$initramfs_dir/bin/e2fsck.static"
+  chmod +x "$initramfs_dir/bin/e2fsck.static"
+else
+  print_warning "e2fsck.static is not in the rootfs, so the bootloader will not check the filesystem before booting"
+fi
+
 print_info "creating the bootloader partition"
 bootloader_img="$work_dir/bootloader.img"
 bootloader_size="$(( $(dir_size_mb "$initramfs_dir") * 5 / 4 + 4 ))"
@@ -115,7 +130,9 @@ if ! is_true "$luks_enabled"; then
   print_info "creating the rootfs partition (${rootfs_used}MiB of data)"
   rootfs_img="$work_dir/rootfs.img"
   rootfs_part_size="$(make_fs_image ext4 "$rootfs_dir" "$rootfs_img" "$rootfs_part_size" "${ext4_opts[@]}")"
+  check_fs_features "$rootfs_img"
 fi
+check_fs_features "$bootloader_img"
 
 print_info "creating the disk image"
 total_size="$(( DISK_OVERHEAD_MB + STATEFUL_SIZE_MB + KERNEL_SIZE_MB + bootloader_size + rootfs_part_size ))"
@@ -142,6 +159,7 @@ if is_true "$luks_enabled"; then
 
   print_info "copying the rootfs (${rootfs_used}MiB of data)"
   mkfs.ext4 -q -F -d "$rootfs_dir" "${ext4_opts[@]}" "/dev/mapper/$mapper_name"
+  check_fs_features "/dev/mapper/$mapper_name"
   sync
   run_cleanups
 else

@@ -1,7 +1,13 @@
 name: build-image
-run-name: Build the reshimboot disk image for dedede
+run-name: Build reshimboot for dedede
+
 on:
   push:
+    #a full image build takes a while, so skip it for documentation changes
+    paths-ignore:
+      - '**.md'
+      - 'website/**'
+      - '.github/ISSUE_TEMPLATE/**'
   workflow_dispatch:
     inputs:
       release:
@@ -13,20 +19,44 @@ on:
         description: "Desktop environment"
         default: "xfce"
         type: choice
-        options: [xfce, gnome, kde, lxde, cinnamon, mate, lxqt]
+        options: [xfce, kde, gnome, lxqt, mate, cinnamon, lxde, none]
+
+#a newer push makes the build of an older commit pointless
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: download repo
+        uses: actions/checkout@v4
+
+      - name: install tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck python3 cpio
+
+      - name: lint and unit tests
+        run: ./tools/lint.sh
+
   build:
+    needs: lint
     permissions:
       contents: write
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        #tagged releases get an image for each of the main desktops,
+        #everything else builds only the requested (or default) one
+        desktop: ${{ fromJSON(startsWith(github.ref, 'refs/tags/') && '["xfce", "kde", "gnome"]' || format('["{0}"]', github.event.inputs.desktop || 'xfce')) }}
     steps:
       - name: remove snap
         uses: ading2210/gh-actions-remove-snap@v1
         with:
           disable_man_db: 'true'
 
-      - name: Maximize build space
+      - name: maximize build space
         uses: easimon/maximize-build-space@master
         with:
           root-reserve-mb: 4096
@@ -42,35 +72,30 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBUG=1 ./build_complete.sh \
-            compress_img=1 quiet=1 \
+            compress_img=xz quiet=1 cache=0 \
             release=${{ github.event.inputs.release || 'trixie' }} \
-            desktop=${{ github.event.inputs.desktop || 'xfce' }}
+            desktop=${{ matrix.desktop }}
 
-      - name: upload img
+      - name: name the image after the desktop
+        run: |
+          cd data
+          sudo mv shimboot_dedede.bin.xz reshimboot_dedede_${{ matrix.desktop }}.bin.xz
+          sudo sh -c 'sha256sum reshimboot_dedede_${{ matrix.desktop }}.bin.xz > reshimboot_dedede_${{ matrix.desktop }}.bin.xz.sha256'
+
+      - name: upload image
         uses: actions/upload-artifact@v4
         with:
-          name: shimboot_dedede
-          path: data/shimboot_dedede.bin
-          compression-level: 6
+          name: reshimboot_dedede_${{ matrix.desktop }}
+          path: |
+            data/reshimboot_dedede_${{ matrix.desktop }}.bin.xz
+            data/reshimboot_dedede_${{ matrix.desktop }}.bin.xz.sha256
+          compression-level: 0
 
       - name: create release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           draft: true
-          files: data/shimboot_dedede.zip
-
-  lint:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: download repo
-        uses: actions/checkout@v4
-
-      - name: install tools
-        run: sudo apt-get update && sudo apt-get install -y shellcheck python3
-
-      - name: shellcheck
-        run: ./tools/lint.sh
-
-      - name: python syntax
-        run: python3 -m py_compile tools/shimtool.py
+          files: |
+            data/reshimboot_dedede_${{ matrix.desktop }}.bin.xz
+            data/reshimboot_dedede_${{ matrix.desktop }}.bin.xz.sha256

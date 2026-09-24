@@ -4,6 +4,9 @@
 #the partitions are built as separate files with "mkfs -d" and then copied
 #into the disk image, so no loop devices are needed unless luks is enabled
 
+#pin the ext4 features to ones that the 5.4 shim kernel supports, see mke2fs.conf
+export MKE2FS_CONFIG="$base_dir/mke2fs.conf"
+
 STATEFUL_SIZE_MB=1
 KERNEL_SIZE_MB=32
 #gpt headers and alignment padding at the start and end of the disk
@@ -83,6 +86,25 @@ make_fs_image() {
   return 1
 }
 
+#ext features that linux 5.4 can mount read-write. anything else (like
+#orphan_file from a newer e2fsprogs) would stop the image from booting.
+KERNEL_SAFE_FS_FEATURES="has_journal ext_attr resize_inode dir_index filetype extent 64bit
+  flex_bg sparse_super large_file huge_file dir_nlink extra_isize metadata_csum metadata_csum_seed needs_recovery"
+
+check_fs_features() {
+  local device="$1"
+  local feature bad=""
+  for feature in $(dumpe2fs -h "$device" 2>/dev/null | sed -n 's/^Filesystem features:[[:space:]]*//p'); do
+    if [[ " $(echo $KERNEL_SAFE_FS_FEATURES) " != *" $feature "* ]]; then
+      bad="$bad $feature"
+    fi
+  done
+  if [ "$bad" ]; then
+    print_error "$(basename "$device") uses ext4 features that the dedede kernel cannot mount:$bad"
+    return 1
+  fi
+}
+
 #write the stateful partition that the factory shim expects to exist
 create_stateful_image() {
   local out_image="$1"
@@ -90,7 +112,7 @@ create_stateful_image() {
   stateful_dir="$(mktemp -d)"
   mkdir -p "$stateful_dir/dev_image/etc/" "$stateful_dir/dev_image/factory/sh"
   touch "$stateful_dir/dev_image/etc/lsb-factory"
-  make_fs_image ext4 "$stateful_dir" "$out_image" "$STATEFUL_SIZE_MB" > /dev/null
+  make_fs_image ext4 "$stateful_dir" "$out_image" "$STATEFUL_SIZE_MB" -O ^has_journal > /dev/null
   rm -rf "$stateful_dir"
 }
 

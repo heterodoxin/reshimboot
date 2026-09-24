@@ -21,6 +21,9 @@ print_help() {
   echo "  i386             - Set this to 0 to not enable 32-bit packages (needed for Steam and Wine)."
   echo "  flatpak          - Set this to 0 to not install Flatpak and the Flathub repo."
   echo "  auto_expand      - Set this to 0 to not grow the rootfs to fill the drive on the first boot."
+  echo "  extra_ca         - A CA certificate to trust during the build only, for networks that intercept HTTPS."
+  echo "  default_password - Set to 1 if user_passwd is a publicly known default, so the user is asked to change it."
+  echo "  cache_dir        - Keep downloaded Debian packages here, which makes later builds much faster."
   echo "If you do not specify the hostname and credentials, you will be prompted for them later."
 }
 
@@ -72,7 +75,7 @@ mkdir -p "$rootfs_dir"
 
 unmount_all() {
   local mountpoint
-  for mountpoint in run dev/pts dev sys proc; do
+  for mountpoint in var/cache/apt/archives run dev/pts dev sys proc; do
     if mountpoint -q "$rootfs_dir/$mountpoint"; then
       umount -l "$rootfs_dir/$mountpoint"
     fi
@@ -97,9 +100,28 @@ if [ "$(need_remount "$rootfs_dir")" ]; then
   do_remount "$rootfs_dir"
 fi
 
+# shellcheck disable=SC2054  # the commas are part of a single --components argument
+debootstrap_opts=(--arch "$SHIMBOOT_ARCH" --components=main,contrib,non-free,non-free-firmware)
+cache_dir="${args['cache_dir']}"
+if [ "$cache_dir" ]; then
+  cache_dir="$(realpath -m "$cache_dir")"
+  mkdir -p "$cache_dir/apt-archives/partial"
+  #the base packages are cached in a tarball, which is refreshed every two
+  #weeks. anything that got updated since then is upgraded later anyway.
+  base_tarball="$cache_dir/debootstrap-$release_name-$SHIMBOOT_ARCH.tar"
+  find "$cache_dir" -maxdepth 1 -name "$(basename "$base_tarball")" -mtime +14 -delete
+  if [ ! -f "$base_tarball" ]; then
+    print_info "downloading the debian $release_name base packages into the cache"
+    tarball_work="$(mktemp -d "$cache_dir/debootstrap.XXXXXX")"
+    add_cleanup "rm -rf '$tarball_work'"
+    debootstrap "${debootstrap_opts[@]}" --make-tarball="$base_tarball.part" "$release_name" "$tarball_work" "$mirror"
+    mv "$base_tarball.part" "$base_tarball"
+  fi
+  debootstrap_opts+=(--unpack-tarball="$base_tarball")
+fi
+
 print_info "bootstrapping debian $release_name"
-debootstrap --arch "$SHIMBOOT_ARCH" --components=main,contrib,non-free,non-free-firmware \
-  "$release_name" "$rootfs_dir" "$mirror"
+debootstrap "${debootstrap_opts[@]}" "$release_name" "$rootfs_dir" "$mirror"
 
 print_info "copying rootfs setup scripts"
 cp -a "$base_dir/rootfs/." "$rootfs_dir/"
@@ -107,6 +129,18 @@ cp -a "$base_dir/rootfs/." "$rootfs_dir/"
 cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf.build"
 rm -f "$rootfs_dir/etc/resolv.conf"
 cp "$rootfs_dir/etc/resolv.conf.build" "$rootfs_dir/etc/resolv.conf"
+
+#networks that intercept https need their certificate trusted inside the
+#chroot as well. it is only used during the build and removed afterwards.
+extra_ca="${args['extra_ca']}"
+if [ "$extra_ca" ]; then
+  if [ ! -f "$extra_ca" ]; then
+    print_error "the certificate $extra_ca does not exist"
+    exit 1
+  fi
+  mkdir -p "$rootfs_dir/usr/local/share/ca-certificates"
+  cp "$extra_ca" "$rootfs_dir/usr/local/share/ca-certificates/reshimboot-build.crt"
+fi
 
 #prevent package scripts from starting services inside the chroot
 cat > "$rootfs_dir/usr/sbin/policy-rc.d" << 'EOF'
@@ -123,6 +157,14 @@ for mountpoint in $chroot_mounts; do
 done
 #use a private /run so that package scripts cannot talk to the host's services
 mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$rootfs_dir/run"
+
+#share downloaded packages between builds
+apt_cache_shared=""
+if [ "$cache_dir" ]; then
+  rm -f "$rootfs_dir/var/cache/apt/archives/"*.deb
+  mount --bind "$cache_dir/apt-archives" "$rootfs_dir/var/cache/apt/archives"
+  apt_cache_shared="1"
+fi
 
 LC_ALL=C.UTF-8 chroot "$rootfs_dir" /usr/bin/env -i \
   PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
@@ -142,6 +184,8 @@ LC_ALL=C.UTF-8 chroot "$rootfs_dir" /usr/bin/env -i \
   ENABLE_I386="${args['i386']:-1}" \
   ENABLE_FLATPAK="${args['flatpak']:-1}" \
   AUTO_EXPAND="${args['auto_expand']:-1}" \
+  DEFAULT_PASSWORD="${args['default_password']}" \
+  APT_CACHE_SHARED="$apt_cache_shared" \
   /bin/bash /opt/setup_rootfs.sh
 
 run_cleanups

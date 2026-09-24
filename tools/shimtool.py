@@ -195,6 +195,179 @@ def extract_partitions(source, requests):
 
 
 # ---------------------------------------------------------------------------
+# streaming zip extraction
+# ---------------------------------------------------------------------------
+
+ZIP_LOCAL_HEADER = 0x04034b50
+ZIP_DATA_DESCRIPTOR = 0x08074b50
+ZIP64_EXTRA_ID = 0x0001
+OUT_CHUNK = 16 << 20
+
+
+class ImageWriter:
+  """Write a disk image, optionally keeping only some of its partitions.
+
+  When partitions are selected, everything else is left as a hole in a sparse
+  file, and the writer reports when every selected byte has been written so
+  the caller can stop reading the rest of the download.
+  """
+
+  def __init__(self, path, keep_parts):
+    self.file = open(path, "wb")
+    self.keep_parts = keep_parts
+    self.position = 0
+    self.header = b""
+    self.ranges = None
+    self.stop_at = None
+    self.disk_size = None
+
+  def _setup_ranges(self):
+    table_size = gpt_table_size(self.header)
+    if len(self.header) < table_size:
+      return False
+    partitions = parse_gpt(self.header[:table_size])
+    alternate_lba, = struct.unpack_from("<Q", self.header, SECTOR + 32)
+    self.disk_size = (alternate_lba + 1) * SECTOR
+    self.ranges = [(0, table_size)]
+    for number in self.keep_parts:
+      part = find_partition(partitions, number)
+      self.ranges.append((part.offset, part.offset + part.size))
+    self.stop_at = max(end for _, end in self.ranges)
+    return True
+
+  def write(self, data):
+    if not self.keep_parts:
+      self.file.write(data)
+      self.position += len(data)
+      return
+
+    start = self.position
+    self.position += len(data)
+    if self.ranges is None:
+      needed = (1 << 20) - len(self.header)
+      if needed > 0:
+        self.header += data[:needed]
+      if len(self.header) >= SECTOR * 2:
+        self._setup_ranges()
+    if self.ranges is None:
+      #the gpt is always in the first few kilobytes, so just keep it for now
+      self.file.seek(start)
+      self.file.write(data)
+      return
+
+    end = self.position
+    for range_start, range_end in self.ranges:
+      lo = max(start, range_start)
+      hi = min(end, range_end)
+      if lo < hi:
+        self.file.seek(lo)
+        self.file.write(data[lo - start:hi - start])
+
+  @property
+  def done(self):
+    return self.stop_at is not None and self.position >= self.stop_at
+
+  def close(self):
+    if self.disk_size is not None:
+      #extend to the full size so partition offsets stay valid
+      self.file.truncate(self.disk_size)
+    self.file.close()
+
+
+def parse_zip64_extra(extra, uncompressed, compressed):
+  offset = 0
+  while offset + 4 <= len(extra):
+    header_id, size = struct.unpack_from("<HH", extra, offset)
+    body = extra[offset + 4:offset + 4 + size]
+    if header_id == ZIP64_EXTRA_ID:
+      fields = [f[0] for f in struct.iter_unpack("<Q", body[:len(body) // 8 * 8])]
+      if uncompressed == 0xffffffff and fields:
+        uncompressed = fields.pop(0)
+      if compressed == 0xffffffff and fields:
+        compressed = fields.pop(0)
+    offset += 4 + size
+  return uncompressed, compressed
+
+
+def stream_unzip(stream, out_path, keep_parts=None, verify=False):
+  """Extract the first file of a zip archive that is read as a stream.
+
+  Unlike funzip, this handles zip64 archives (anything over 4 GB, which
+  includes the dedede shim and recovery images) and checks the CRC32.
+  When keep_parts is given, only those partitions are written and reading
+  stops as soon as they are complete, unless verify is set.
+  Returns "verified" or "partial".
+  """
+  header = read_exact(stream, 30)
+  if len(header) < 30:
+    raise ShimToolError("the download is empty or not a zip file")
+  (signature, _, flags, method, _, _, crc, compressed, uncompressed,
+   name_length, extra_length) = struct.unpack("<IHHHHHIIIHH", header)
+  if signature != ZIP_LOCAL_HEADER:
+    raise ShimToolError("the download is not a zip file (it may be an error page)")
+  if flags & 1:
+    raise ShimToolError("encrypted zip files are not supported")
+  name = read_exact(stream, name_length).decode(errors="replace")
+  extra = read_exact(stream, extra_length)
+  uncompressed, compressed = parse_zip64_extra(extra, uncompressed, compressed)
+  print(f"shimtool: extracting {name}", file=sys.stderr)
+
+  writer = ImageWriter(out_path, keep_parts or [])
+  actual_crc = 0
+  total = 0
+  trailing = b""
+  try:
+    if method == 0:
+      if flags & 8:
+        raise ShimToolError("stored zip entries with data descriptors are not supported")
+      remaining = compressed
+      while remaining > 0:
+        chunk = stream.read(min(remaining, 1 << 20))
+        if not chunk:
+          raise ShimToolError("the download ended early")
+        remaining -= len(chunk)
+        actual_crc = zlib.crc32(chunk, actual_crc)
+        total += len(chunk)
+        writer.write(chunk)
+        if writer.done and not verify:
+          return "partial"
+    elif method == 8:
+      decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+      while not decompressor.eof:
+        chunk = stream.read(1 << 20)
+        if not chunk:
+          raise ShimToolError("the download ended early, the file is incomplete")
+        data = decompressor.decompress(chunk, OUT_CHUNK)
+        while True:
+          if data:
+            actual_crc = zlib.crc32(data, actual_crc)
+            total += len(data)
+            writer.write(data)
+            if writer.done and not verify:
+              return "partial"
+          if not decompressor.unconsumed_tail or decompressor.eof:
+            break
+          data = decompressor.decompress(decompressor.unconsumed_tail, OUT_CHUNK)
+      trailing = decompressor.unused_data
+    else:
+      raise ShimToolError(f"unsupported zip compression method {method}")
+
+    if flags & 8:
+      #the crc is stored after the data, optionally with a signature
+      trailing += read_exact(stream, max(0, 16 - len(trailing)))
+      if struct.unpack_from("<I", trailing, 0)[0] == ZIP_DATA_DESCRIPTOR:
+        trailing = trailing[4:]
+      crc, = struct.unpack_from("<I", trailing, 0)
+    if actual_crc != crc:
+      raise ShimToolError(f"CRC mismatch ({actual_crc:08x} != {crc:08x}), the download is corrupted")
+    if uncompressed not in (0, 0xffffffff) and total != uncompressed:
+      raise ShimToolError(f"size mismatch ({total} != {uncompressed}), the download is corrupted")
+    return "verified"
+  finally:
+    writer.close()
+
+
+# ---------------------------------------------------------------------------
 # kernel parsing
 # ---------------------------------------------------------------------------
 
@@ -393,6 +566,22 @@ def cmd_extract(args):
   extract_partitions(args.image, requests)
 
 
+def cmd_unzip(args):
+  keep_parts = []
+  if args.parts:
+    for number in args.parts.split(","):
+      if not number.strip().isdigit():
+        raise ShimToolError(f"invalid partition number '{number}'")
+      keep_parts.append(int(number))
+  stream = sys.stdin.buffer if args.zip == "-" else open(args.zip, "rb")
+  try:
+    result = stream_unzip(stream, args.output, keep_parts, args.verify)
+  finally:
+    if stream is not sys.stdin.buffer:
+      stream.close()
+  print(f"shimtool: {result}", file=sys.stderr)
+
+
 def cmd_initramfs(args):
   vmlinux = extract_vmlinux(read_file(args.kernel))
   write_output(args.output, find_initramfs(vmlinux))
@@ -420,6 +609,13 @@ def main(argv=None):
   p.add_argument("image")
   p.add_argument("parts", nargs="+", metavar="NUMBER:PATH")
   p.set_defaults(func=cmd_extract)
+
+  p = sub.add_parser("unzip", help="extract a zipped disk image as a stream, with zip64 and crc checks")
+  p.add_argument("zip", help="the zip file, or '-' to read from stdin")
+  p.add_argument("output")
+  p.add_argument("--parts", help="only keep these partitions (comma separated) and stop reading once they are done")
+  p.add_argument("--verify", action="store_true", help="with --parts, keep reading to the end to check the crc")
+  p.set_defaults(func=cmd_unzip)
 
   p = sub.add_parser("initramfs", help="extract the initramfs cpio archive from a kernel")
   p.add_argument("kernel")
