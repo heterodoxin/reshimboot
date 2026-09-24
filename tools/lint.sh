@@ -23,7 +23,7 @@ for f in bootloader/bin/bootstrap.sh bootloader/bin/init squashfs/bin/bootstrap.
 done
 
 echo ">> python syntax"
-python3 -m py_compile tools/shimtool.py tests/test_shimtool.py
+python3 -m py_compile tools/shimtool.py tools/patch_systemd.py tests/test_shimtool.py tests/test_patch_systemd.py
 
 echo ">> shimtool unit tests"
 if ! test_output="$(python3 -m unittest discover -s tests 2>&1)"; then

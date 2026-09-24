@@ -8,7 +8,7 @@ print_help() {
   echo "Usage: ./build_rootfs.sh rootfs_path [release_name]"
   echo "The release defaults to 'trixie' (Debian 13)."
   echo "Valid named arguments (specify with 'key=value'):"
-  echo "  custom_packages  - The packages that will be installed in place of task-xfce-desktop."
+  echo "  custom_packages  - The packages that will be installed in place of task-kde-desktop."
   echo "  hostname         - The hostname for the new rootfs."
   echo "  enable_root      - Enable the root user."
   echo "  root_passwd      - The root password. This only has an effect if enable_root is set."
@@ -24,6 +24,8 @@ print_help() {
   echo "  extra_ca         - A CA certificate to trust during the build only, for networks that intercept HTTPS."
   echo "  default_password - Set to 1 if user_passwd is a publicly known default, so the user is asked to change it."
   echo "  cache_dir        - Keep downloaded Debian packages here, which makes later builds much faster."
+  echo "  systemd_repo     - A directory made by build_systemd.sh to install the patched systemd from,"
+  echo "                     instead of the shimboot repo. Needed for releases the shimboot repo lacks."
   echo "If you do not specify the hostname and credentials, you will be prompted for them later."
 }
 
@@ -48,17 +50,22 @@ if [ "${args['arch']}" ] && [ "${args['arch']}" != "$SHIMBOOT_ARCH" ]; then
 fi
 
 case "$release_name" in
-  bookworm|trixie) ;;
-  forky|testing|sid|unstable)
-    print_warning "Warning: Debian $release_name is not a stable release."
-    print_warning "Newer systemd versions may not work with the 5.4 kernel that dedede's shim uses, and the"
-    print_warning "patched systemd in the shimboot repo can lag behind Debian. The build will stop if this happens."
+  bookworm|trixie|forky) ;;
+  sid|unstable)
+    print_warning "Warning: Debian $release_name changes every day and can break at any time."
     ;;
   *)
-    print_error "'$release_name' is not a supported Debian release. Use trixie (recommended), bookworm, forky, or sid."
+    print_error "'$release_name' is not a supported Debian release. Use forky, trixie, bookworm, or sid."
     exit 1
     ;;
 esac
+
+#the shimboot repo only has systemd builds that match bookworm and trixie
+if [ "$release_name" != "bookworm" ] && [ "$release_name" != "trixie" ] && [ ! "${args['systemd_repo']}" ]; then
+  print_error "Debian $release_name needs a locally built systemd. Run ./build_systemd.sh first and pass"
+  print_error "its output with systemd_repo=, or use build_complete.sh, which does this for you."
+  exit 1
+fi
 
 host_timezone=""
 if [ -f /etc/timezone ]; then
@@ -67,7 +74,7 @@ elif [ -L /etc/localtime ]; then
   host_timezone="$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')"
 fi
 
-packages="${args['custom_packages']-task-xfce-desktop}"
+packages="${args['custom_packages']-task-kde-desktop}"
 mirror="${args['mirror']:-http://deb.debian.org/debian}"
 chroot_mounts="proc sys dev"
 
@@ -125,6 +132,19 @@ debootstrap "${debootstrap_opts[@]}" "$release_name" "$rootfs_dir" "$mirror"
 
 print_info "copying rootfs setup scripts"
 cp -a "$base_dir/rootfs/." "$rootfs_dir/"
+
+systemd_source="shimboot"
+if [ "${args['systemd_repo']}" ]; then
+  systemd_repo="$(realpath -m "${args['systemd_repo']}")"
+  if [ ! -f "$systemd_repo/Packages" ]; then
+    print_error "$systemd_repo is not a repo made by build_systemd.sh"
+    exit 1
+  fi
+  rm -rf "$rootfs_dir/var/lib/reshimboot/systemd-repo"
+  mkdir -p "$rootfs_dir/var/lib/reshimboot/systemd-repo"
+  cp "$systemd_repo/"*.deb "$systemd_repo/Packages" "$rootfs_dir/var/lib/reshimboot/systemd-repo/"
+  systemd_source="local"
+fi
 #this is a copy of the host's dns config for use during the build only
 cp -L /etc/resolv.conf "$rootfs_dir/etc/resolv.conf.build"
 rm -f "$rootfs_dir/etc/resolv.conf"
@@ -186,6 +206,7 @@ LC_ALL=C.UTF-8 chroot "$rootfs_dir" /usr/bin/env -i \
   AUTO_EXPAND="${args['auto_expand']:-1}" \
   DEFAULT_PASSWORD="${args['default_password']}" \
   APT_CACHE_SHARED="$apt_cache_shared" \
+  SYSTEMD_SOURCE="$systemd_source" \
   /bin/bash /opt/setup_rootfs.sh
 
 run_cleanups

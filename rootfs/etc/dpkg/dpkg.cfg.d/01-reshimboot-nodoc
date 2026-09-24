@@ -1,0 +1,4 @@
+# reshimboot: leave out /usr/share/doc (except the license files) to keep the
+# image small enough for an 8 GB drive. Man pages are still installed.
+path-exclude=/usr/share/doc/*
+path-include=/usr/share/doc/*/copyright

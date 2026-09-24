@@ -11,16 +11,16 @@ fi
 . ./image_utils.sh
 . ./shim_utils.sh
 
-valid_desktops="xfce gnome kde lxde gnome-flashback cinnamon mate lxqt none"
-valid_releases="trixie bookworm forky sid"
+valid_desktops="kde gnome xfce lxde gnome-flashback cinnamon mate lxqt none"
+valid_releases="trixie forky bookworm sid"
 
 print_help() {
   echo "Usage: sudo ./build_complete.sh [key=value ...]"
   echo "reshimboot only builds for the dedede board, so no board name is needed."
   echo
   echo "Image options:"
-  echo "  desktop      - The desktop to install: $valid_desktops. Defaults to 'xfce'."
-  echo "  release      - The Debian release: trixie (default), bookworm, forky, or sid."
+  echo "  desktop      - The desktop to install: $valid_desktops. Defaults to 'kde' (KDE Plasma)."
+  echo "  release      - The Debian release: trixie (Debian 13, default), forky (Debian 14, experimental), bookworm, or sid."
   echo "  luks         - Set to 1 to encrypt the rootfs partition with LUKS2."
   echo "  autoboot     - Seconds before the bootloader boots Debian automatically. 0 disables it. Defaults to 5."
   echo "  compress_img - Set to 1 to also write a .zip of the image, or 'xz' for a smaller .xz."
@@ -35,6 +35,9 @@ print_help() {
   echo "  i386         - Set to 0 to skip 32-bit packages (needed for Steam and Wine)."
   echo "  auto_expand  - Set to 0 to not grow the rootfs to fill the drive on the first boot."
   echo "  mirror       - The Debian mirror. Defaults to http://deb.debian.org/debian"
+  echo "  systemd      - Where the patched systemd comes from: 'shimboot' (prebuilt, only for bookworm"
+  echo "                 and trixie), 'build' (compiled locally, takes 15-30 minutes the first time),"
+  echo "                 or 'auto' (default: shimboot when it has the release, otherwise build)."
   echo
   echo "Build options:"
   echo "  data_dir     - The working directory. Defaults to ./data"
@@ -73,7 +76,7 @@ if [ "${args['distro']}" ] && [ "${args['distro']}" != "debian" ]; then
 fi
 
 board="$SHIMBOOT_BOARD"
-desktop="${args['desktop']:-xfce}"
+desktop="${args['desktop']:-kde}"
 release="${args['release']:-trixie}"
 compress_img="${args['compress_img']}"
 quiet="${args['quiet']}"
@@ -92,6 +95,41 @@ if [[ " $valid_releases " != *" $release "* ]]; then
   print_error "'$release' is not a supported release. Valid options: $valid_releases"
   exit 1
 fi
+#the shimboot repo only has patched systemd packages that match bookworm and
+#trixie. newer releases get a locally compiled one.
+systemd_mode="${args['systemd']:-auto}"
+case "$systemd_mode" in
+  auto)
+    case "$release" in
+      bookworm|trixie) systemd_mode="shimboot" ;;
+      *) systemd_mode="build" ;;
+    esac
+    ;;
+  shimboot|build) ;;
+  *)
+    print_error "systemd must be 'auto', 'shimboot', or 'build'"
+    exit 1
+    ;;
+esac
+
+#systemd 258 and newer need at least linux 5.10 and fail to mount /proc on
+#dedede's 5.4 kernel ("Failed to mount early API filesystems"). forky and sid
+#therefore get trixie's systemd (257), compiled for them.
+systemd_source_release="$release"
+if [ "$release" = "forky" ] || [ "$release" = "sid" ]; then
+  systemd_source_release="trixie"
+  if [ "$systemd_mode" = "shimboot" ]; then
+    print_error "the shimboot repo has no systemd for $release that works with the 5.4 kernel, use systemd=build"
+    exit 1
+  fi
+  #gdm needs systemd 259, so gnome can't be installed with systemd 257
+  if [ "$desktop" = "gnome" ] || [ "$desktop" = "gnome-flashback" ]; then
+    print_error "GNOME on Debian $release needs systemd 259 or newer, which can't run on dedede's 5.4 kernel."
+    print_error "Use release=trixie for GNOME, or pick another desktop."
+    exit 1
+  fi
+fi
+
 if [ "$desktop" = "none" ]; then
   desktop_package=""
 else
@@ -250,6 +288,17 @@ if [ ! "${args['user_passwd']}" ]; then
   default_password="1"
 fi
 
+systemd_repo=""
+if [ ! "$rootfs_dir" ] && [ "$systemd_mode" = "build" ]; then
+  print_title "building the patched systemd for debian $release"
+  ./build_systemd.sh "$data_dir/systemd" "$release" \
+    source_release="$systemd_source_release" \
+    mirror="${args['mirror']}" \
+    extra_ca="${args['extra_ca']}" \
+    cache_dir="$apt_cache_dir"
+  systemd_repo="$data_dir/systemd/$release"
+fi
+
 if [ ! "$rootfs_dir" ]; then
   print_title "building the debian $release rootfs"
   rootfs_dir="$data_dir/rootfs_$board"
@@ -272,6 +321,7 @@ if [ ! "$rootfs_dir" ]; then
     auto_expand="${args['auto_expand']:-1}" \
     extra_ca="${args['extra_ca']}" \
     default_password="$default_password" \
+    systemd_repo="$systemd_repo" \
     cache_dir="$apt_cache_dir"
 fi
 

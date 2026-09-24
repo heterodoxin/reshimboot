@@ -14,12 +14,12 @@ on:
         description: "Debian release"
         default: "trixie"
         type: choice
-        options: [trixie, bookworm, forky]
+        options: [trixie, forky, bookworm, sid]
       desktop:
         description: "Desktop environment"
-        default: "xfce"
+        default: "kde"
         type: choice
-        options: [xfce, kde, gnome, lxqt, mate, cinnamon, lxde, none]
+        options: [kde, xfce, gnome, lxqt, mate, cinnamon, lxde, none]
 
 #a newer push makes the build of an older commit pointless
 concurrency:
@@ -49,7 +49,7 @@ jobs:
       matrix:
         #tagged releases get an image for each of the main desktops,
         #everything else builds only the requested (or default) one
-        desktop: ${{ fromJSON(startsWith(github.ref, 'refs/tags/') && '["xfce", "kde", "gnome"]' || format('["{0}"]', github.event.inputs.desktop || 'xfce')) }}
+        desktop: ${{ fromJSON(startsWith(github.ref, 'refs/tags/') && '["kde", "xfce", "gnome"]' || format('["{0}"]', github.event.inputs.desktop || 'kde')) }}
     steps:
       #pinned fork, see easimon/maximize-build-space#58 (same fix as upstream shimboot)
       - name: maximize build space
@@ -69,6 +69,15 @@ jobs:
 
       - name: download repo
         uses: actions/checkout@v4
+
+      #the patched systemd for forky and sid is compiled during the build,
+      #which takes a while. build_systemd.sh reuses it until debian updates systemd.
+      - name: restore the patched systemd
+        uses: actions/cache@v4
+        with:
+          path: data/systemd
+          key: systemd-${{ github.event.inputs.release || 'trixie' }}-${{ github.run_id }}
+          restore-keys: systemd-${{ github.event.inputs.release || 'trixie' }}-
 
       #/ only has 4GB left after the step above, so keep temporary files in the workspace
       - name: run build

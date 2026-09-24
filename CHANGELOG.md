@@ -21,11 +21,23 @@ userland. It was developed with AI assistance; see the README.
   forced "update required" screen on every boot and keeps an update from
   undoing the verified-mode spoof. The donor partition is bind-mounted instead
   of copied into RAM.
+- The menu shows the Chrome OS version on ROOT-A and ROOT-B and marks the one
+  a normal boot uses as `(current)`. It warns before booting the older copy,
+  which would make Chrome OS install the same update again.
+- The spoofed `crossystem` was rewritten in plain bash. It is more than 10 times
+  faster, parses values with spaces, quotes, `=` or `#` correctly, runs each
+  `set` only once, and passes unknown keys to the real `crossystem`.
 
 ### Operating system
 
-- Debian 13 (Trixie) by default, with deb822 sources and the security and
-  updates repositories.
+- Debian 13 (trixie) with KDE Plasma by default; the other desktops are still
+  available. deb822 sources, with the security and updates repositories.
+- Debian 14 (forky) and sid can be built (experimental). They use trixie's
+  systemd 257, because systemd 258 and newer can't boot on Linux 5.4.
+- The patched systemd can be compiled locally (`build_systemd.sh`) for any
+  Debian release, instead of depending on the shimboot repo having a matching
+  build. It is kept in the image as a local apt repo and pinned, so Debian's
+  unpatched systemd can't replace it.
 - PipeWire and WirePlumber, NetworkManager, systemd-resolved, systemd-timesyncd.
 - Audio: the SOF firmware path the 5.4 kernel needs is taken from the shim
   (the recovery image's copy lacks it), and the Chromebook UCM configs are
@@ -53,7 +65,9 @@ userland. It was developed with AI assistance; see the README.
 - `reshimboot-welcome`: a first-login dialog with tips and a system check, which
   keeps asking to replace the default password until it is changed.
 - `shimboot-doctor`: reports the state of systemd, storage, Wi-Fi, audio,
-  graphics, and sandboxing. `sudo shimboot-doctor --fix` repairs the common
+  graphics, and sandboxing. It recognises Wi-Fi cards that the 5.4 kernel has
+  no driver for (the Realtek RTL8852BE in some newer dedede models), and can
+  turn Wi-Fi back on or reinstall its firmware. `sudo shimboot-doctor --fix` repairs the common
   problems (unpatched systemd, zram, iptables backend, audio configs, bwrap,
   rootfs expansion).
 - An apt hook that warns before you reboot into an unpatched systemd.

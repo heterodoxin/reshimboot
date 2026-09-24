@@ -1,8 +1,14 @@
 #!/bin/bash
 
-#a much cleaner implemenation of fakemurk's crossystem.sh 
+#a much cleaner implemenation of fakemurk's crossystem.sh
+#this is bind mounted over /usr/bin/crossystem when chrome os is booted with
+#the verified mode spoof. it reports the values that a normally booted,
+#verified chrome os would have, and passes everything else to the real one.
 
 crossystem_old=/tmp/crossystem_old
+#the bootloader sets this to 1 when the invalid hwid spoof is chosen
+invalid_hwid=0
+
 declare -A crossystem_dict=(
   ["cros_debug"]="1"
   ["dev_boot_legacy"]="0"
@@ -18,61 +24,67 @@ declare -A crossystem_dict=(
   ["recoverysw_cur"]="0"
 )
 
-dict_get() {
-  echo "${crossystem_dict[$1]}"
-}
+#an invalid hwid stops enrollment. this replaces the block_devmode spoof,
+#which is the same behavior as the original shimboot.
+if [ "$invalid_hwid" = "1" ]; then
+  unset 'crossystem_dict[block_devmode]'
+  crossystem_dict["hwid"]="1"
+fi
 
-parse_arg() {
-  local arg="$1"
-
-  #set values mode - pass this through without changes
-  if [[ "$arg" =~ "=" ]]; then
-    $crossystem_old "$@"
-
-  #search value mode
-  elif [[ "$arg" =~ "?" ]]; then
-    key=$(echo $arg | cut -d "?" -f 1)
-    query=$(echo $arg | cut -d "?" -f 2)
-    if ! [ "${crossystem_dict[$key]}" = "$query" ]; then
-      exit 1
-    fi
-  
-  #get value mode
-  elif [ "${crossystem_dict[$arg]}" ]; then
-    printf "${crossystem_dict[$arg]}"
-  
-  #value not found - print help and exit
-  else
-    $crossystem_old --help
-    exit 1
-  fi
-}
-
-crossystem_out="$($crossystem_old)"
-#crossystem_out=$(cat data/crossystem.txt)
-  
-#add crossystem output to the dict
+#add the real values of everything that is not spoofed. this is plain bash,
+#since the real crossystem prints around 60 lines and chrome calls this often.
+crossystem_out="$("$crossystem_old" 2>/dev/null)"
 while IFS= read -r line; do
-  line=$(echo $line | cut -d "#" -f 1)
-  key=$(echo $line | cut -d "=" -f 1 | xargs)
-  value=$(echo $line | cut -d "=" -f 2 | xargs)
-  if [ -z "${crossystem_dict[$key]}" ]; then
+  line="${line%%#*}"
+  [[ "$line" == *=* ]] || continue
+  key="${line%%=*}"
+  value="${line#*=}"
+  #trim the whitespace around the key and the value
+  key="${key#"${key%%[![:space:]]*}"}"
+  key="${key%"${key##*[![:space:]]}"}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [ "$key" ] && [ -z "${crossystem_dict[$key]+set}" ]; then
     crossystem_dict["$key"]="$value"
   fi
 done <<< "$crossystem_out"
 
 #crossystem called with no arguments, print out all properties
 if [ -z "$1" ] || [ "$1" = "--all" ]; then
-  keys="${!crossystem_dict[@]}"
-  keys="$(echo "$keys" | tr " " "\n" | sort)"
-  for key in $keys; do
-    value="${crossystem_dict[$key]}"
-    echo "$key = $value"
-  done
-  
+  while IFS= read -r key; do
+    printf '%-24s = %s\n' "$key" "${crossystem_dict[$key]}"
+  done < <(printf '%s\n' "${!crossystem_dict[@]}" | sort)
   exit 0
 fi
 
+status=0
 for arg in "$@"; do
-  parse_arg $arg
+  if [[ "$arg" == -* ]]; then
+    #options such as --help go to the real crossystem
+    "$crossystem_old" "$arg"
+    status=$?
+
+  #set a value - this is passed through without changes
+  elif [[ "$arg" == *=* ]]; then
+    "$crossystem_old" "$arg" || status=1
+
+  #check a value, such as "devsw_boot?0"
+  elif [[ "$arg" == *\?* ]]; then
+    key="${arg%%\?*}"
+    query="${arg#*\?}"
+    if [ -z "${crossystem_dict[$key]+set}" ]; then
+      "$crossystem_old" "$arg" || status=1
+    elif [ "${crossystem_dict[$key]}" != "$query" ]; then
+      status=1
+    fi
+
+  #get a value
+  elif [ "${crossystem_dict[$arg]+set}" ]; then
+    printf '%s' "${crossystem_dict[$arg]}"
+
+  #a value that the real crossystem did not print, let it handle the error
+  else
+    "$crossystem_old" "$arg" || status=1
+  fi
 done
+exit "$status"

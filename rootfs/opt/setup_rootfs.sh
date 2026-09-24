@@ -10,11 +10,16 @@ if [ "$DEBUG" ]; then
 fi
 
 export DEBIAN_FRONTEND="noninteractive"
+#tells shimboot-apt-hook that the build checks the patched systemd itself
+export RESHIMBOOT_BUILD="1"
 export LC_ALL="C.UTF-8"
 
 #the patched systemd lives here, see https://github.com/ading2210/chromeos-systemd
 shimboot_repo="https://shimboot.ading.dev/debian"
 shimboot_repo_domain="shimboot.ading.dev"
+#releases that the shimboot repo does not cover get a systemd built by
+#build_systemd.sh instead, which is kept in the image as a local apt repo
+local_systemd_repo="/var/lib/reshimboot/systemd-repo"
 
 apt_opts=(-y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
 
@@ -35,8 +40,12 @@ apt_install() {
 apt_install_available() {
   local available=()
   local pkg
+  local candidate
   for pkg in "$@"; do
-    if apt-cache show "$pkg" > /dev/null 2>&1; then
+    #virtual packages that nothing provides show up in apt-cache show,
+    #but have no candidate and cannot be installed
+    candidate="$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/ {print $2}')"
+    if [ "$candidate" ] && [ "$candidate" != "(none)" ]; then
       available+=("$pkg")
     else
       print_warning "package $pkg is not available in $RELEASE, skipping it"
@@ -92,6 +101,10 @@ EOF
 #publish systemd with identical version numbers, and apt downloads an
 #identical version from whichever source it reads first.
 write_shimboot_sources() {
+  if [ "$SYSTEMD_SOURCE" = "local" ]; then
+    write_local_systemd_sources
+    return
+  fi
   cat > /etc/apt/sources.list.d/00-shimboot.sources << EOF
 Types: deb
 URIs: $shimboot_repo
@@ -108,10 +121,61 @@ Pin-Priority: 1001
 EOF
 }
 
+#the locally built packages have a "+reshimboot" version suffix. the pin
+#keeps apt from ever replacing them with debian's unpatched systemd, even
+#when debian publishes a newer version.
+write_local_systemd_sources() {
+  cat > /etc/apt/sources.list.d/00-reshimboot-systemd.sources << EOF
+Types: deb
+URIs: file:$local_systemd_repo
+Suites: ./
+Trusted: yes
+EOF
+
+  #version pins only work with package names, not "Package: *"
+  local pkgs
+  pkgs="$(awk '$1 == "Package:" {print $2}' "$local_systemd_repo/Packages" | sort -u | tr '\n' ' ')"
+  cat > /etc/apt/preferences.d/00-reshimboot-systemd << EOF
+Package: $pkgs
+Pin: version /\+reshimboot/
+Pin-Priority: 1001
+EOF
+
+  #the shimboot repo is still used for croskbd (the chromebook keyboard
+  #layout), but nothing else may come from it, since its systemd build
+  #does not match this release
+  cat > /etc/apt/sources.list.d/01-shimboot-extras.sources << EOF
+Types: deb
+URIs: $shimboot_repo
+Suites: unstable
+Components: main
+Architectures: amd64
+Trusted: yes
+EOF
+  cat > /etc/apt/preferences.d/01-shimboot-extras << EOF
+Package: croskbd
+Pin: origin $shimboot_repo_domain
+Pin-Priority: 500
+
+Package: *
+Pin: origin $shimboot_repo_domain
+Pin-Priority: -1
+EOF
+}
+
+#the apt package list of whichever repo has the patched systemd
+patched_systemd_list() {
+  if [ "$SYSTEMD_SOURCE" = "local" ]; then
+    ls /var/lib/apt/lists/*reshimboot_systemd-repo_._Packages 2>/dev/null | head -n1
+  else
+    ls /var/lib/apt/lists/*"${shimboot_repo_domain}"*"_binary-amd64_Packages" 2>/dev/null | head -n1
+  fi
+}
+
 #the packages from the shimboot repo that are currently installed
 installed_shimboot_packages() {
   local list_file
-  list_file="$(ls /var/lib/apt/lists/*"${shimboot_repo_domain}"*"_binary-amd64_Packages" 2>/dev/null | head -n1)"
+  list_file="$(patched_systemd_list)"
   if [ ! "$list_file" ]; then
     return 0
   fi
@@ -127,9 +191,9 @@ installed_shimboot_packages() {
 #an unpatched systemd fails to boot with "Failed to mount API filesystems"
 verify_patched_systemd() {
   local list_file pkg version expected actual deb
-  list_file="$(ls /var/lib/apt/lists/*"${shimboot_repo_domain}"*"_binary-amd64_Packages" 2>/dev/null | head -n1)"
+  list_file="$(patched_systemd_list)"
   if [ ! "$list_file" ]; then
-    echo "The shimboot package list could not be downloaded from $shimboot_repo." >&2
+    echo "The package list with the patched systemd could not be read." >&2
     return 1
   fi
 
@@ -299,8 +363,15 @@ EOF
 
 install_desktop() {
   print_step "installing the desktop: $PACKAGES"
+  #the desktop tasks pull in some very large extras. leaving these out saves
+  #around 900MB, and they can still be installed later with apt.
+  local slim_excludes=(gimp- fonts-noto-extra- fonts-noto-cjk-extra- ibus-)
   # shellcheck disable=SC2086
-  apt_install $PACKAGES
+  if [ "$PACKAGES" ] && ! apt_install $PACKAGES "${slim_excludes[@]}"; then
+    print_warning "the desktop needs some of the large extras, installing them too"
+    # shellcheck disable=SC2086
+    apt_install $PACKAGES
+  fi
 
   #extras that the task packages do not always pull in
   if [ "$PACKAGES" ]; then
@@ -312,7 +383,13 @@ install_desktop() {
       apt_install_available blueman pavucontrol network-manager-gnome
       ;;
     *kde*)
-      apt_install_available plasma-nm bluedevil plasma-pa
+      apt_install_available plasma-nm bluedevil plasma-pa sddm-theme-breeze kde-config-sddm
+      #plasma defaults to wayland. the x11 session is kept as a fallback
+      #that can be picked on the login screen if wayland misbehaves.
+      apt_install_available kwin-x11 plasma-session-x11
+      if [ "$ENABLE_FLATPAK" = "1" ]; then
+        apt_install_available plasma-discover-backend-flatpak
+      fi
       ;;
   esac
 
@@ -407,8 +484,36 @@ enable_services() {
   systemctl mask systemd-hibernate-resume.service > /dev/null 2>&1 || true
 }
 
+#keep only the locally built packages that are actually installed, so that
+#they can be reinstalled offline without wasting space on the rest
+prune_local_systemd_repo() {
+  local deb pkg keep_list=""
+  for deb in "$local_systemd_repo"/*.deb; do
+    pkg="$(basename "$deb" | cut -d_ -f1)"
+    if dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then
+      keep_list="$keep_list $pkg"
+    else
+      rm -f "$deb"
+    fi
+  done
+  awk -v keep="$keep_list " '
+    BEGIN {RS = ""; ORS = "\n\n"}
+    {
+      split($0, lines, "\n")
+      for (i in lines) if (lines[i] ~ /^Package: /) name = substr(lines[i], 10)
+      if (index(keep, " " name " ")) print
+    }
+  ' "$local_systemd_repo/Packages" > "$local_systemd_repo/Packages.new"
+  mv "$local_systemd_repo/Packages.new" "$local_systemd_repo/Packages"
+  apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/00-reshimboot-systemd.sources \
+    -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 > /dev/null
+}
+
 finalize() {
   print_step "cleaning up"
+  if [ "$SYSTEMD_SOURCE" = "local" ]; then
+    prune_local_systemd_repo
+  fi
   #remove the certificate that was only trusted for the build
   if [ -f /usr/local/share/ca-certificates/reshimboot-build.crt ]; then
     rm -f /usr/local/share/ca-certificates/reshimboot-build.crt

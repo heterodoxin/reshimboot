@@ -53,14 +53,22 @@ check_systemd() {
   echo "== systemd"
   local systemd_version
   systemd_version="$(dpkg-query -W -f='${Version}' systemd 2>/dev/null)"
-  if ! ls /var/lib/apt/lists/*shimboot*_Packages > /dev/null 2>&1; then
+  local pkgs="systemd systemd-sysv libsystemd-shared libsystemd0 udev libudev1"
+  if [[ "$systemd_version" == *+reshimboot* ]]; then
+    #built by build_systemd.sh, and kept in a local repo in the image
+    ok "systemd $systemd_version is the patched version (built by reshimboot)"
+  elif [ -d /var/lib/reshimboot/systemd-repo ]; then
+    bad "systemd $systemd_version is not the patched version, the system may not boot again"
+    add_fix "reinstall the patched systemd" \
+      "apt-get update && apt-get install -y --reinstall --allow-downgrades \$(cd /var/lib/reshimboot/systemd-repo && ls *.deb | cut -d_ -f1)"
+  elif ! ls /var/lib/apt/lists/*shimboot*_Packages > /dev/null 2>&1; then
     warn "systemd $systemd_version (run 'sudo apt update' so this can be checked)"
   elif apt-cache madison systemd 2>/dev/null | grep shimboot | grep -qF " $systemd_version "; then
     ok "systemd $systemd_version is the patched version"
   else
     bad "systemd $systemd_version is not from the shimboot repo, the system may not boot again"
     add_fix "reinstall the patched systemd" \
-      "apt-get update && apt-get install -y --reinstall --allow-downgrades systemd systemd-sysv libsystemd-shared libsystemd0"
+      "apt-get update && apt-get install -y --reinstall --allow-downgrades $pkgs"
   fi
 
   local failed_units
@@ -93,19 +101,61 @@ check_storage() {
   fi
 }
 
+#pci ids of wifi cards used in some dedede models that have no driver in the
+#5.4 shim kernel. these only work with a newer kernel, which shimboot cannot use.
+unsupported_wifi_ids="10ec:b852 10ec:b85b 10ec:8852 10ec:c852 14c3:7961 14c3:0616 14c3:7922 17cb:1103"
+
 check_wifi() {
   echo "== wifi"
-  if ip -o link show 2>/dev/null | grep -q ": wl"; then
-    ok "wifi interface: $(ip -o link show | awk -F': ' '/: wl/ {print $2}' | head -n1)"
+  local card id
+  card="$(lspci -nn 2>/dev/null | grep -iE "network controller|wireless" | head -n1)"
+  if [ "$card" ]; then
+    info "card: ${card#*: }"
+    for id in $unsupported_wifi_ids; do
+      if echo "$card" | grep -qi "\[$id\]"; then
+        bad "this wifi card has no driver in the dedede shim kernel (5.4), so wifi cannot work"
+        info "use a usb wifi adapter, usb ethernet, or usb tethering from a phone instead"
+        return
+      fi
+    done
+  fi
+
+  local iface
+  iface="$(ip -o link show 2>/dev/null | awk -F': ' '/: wl/ {print $2}' | head -n1)"
+  if [ "$iface" ]; then
+    ok "wifi interface: $iface"
   else
     bad "no wifi interface found"
+    if [ ! -d "/lib/modules/$(uname -r)" ]; then
+      info "the kernel modules are missing, see the reshimboot section above"
+    else
+      add_fix "load the wifi drivers" "modprobe -a iwlwifi iwlmvm rtw88_8822ce 2>/dev/null; true"
+    fi
   fi
+
   local fw_line
   fw_line="$(echo "$dmesg_log" | grep -E "iwlwifi.*loaded firmware version|rtw.*Firmware version" | tail -n1)"
   if [ "$fw_line" ]; then
     info "${fw_line#*] }"
-  elif echo "$dmesg_log" | grep -qE "iwlwifi.*(no suitable firmware|failed to load)"; then
-    bad "the wifi firmware could not be loaded"
+  elif echo "$dmesg_log" | grep -qE "(iwlwifi|rtw).*(no suitable firmware|failed to load|firmware.*failed)"; then
+    bad "the wifi firmware could not be loaded:"
+    info "$(echo "$dmesg_log" | grep -E "(iwlwifi|rtw).*(firmware|ucode)" | tail -n2 | sed 's/^\[[^]]*\] //')"
+    add_fix "reinstall the wifi firmware" "apt-get install -y --reinstall firmware-iwlwifi firmware-realtek"
+  fi
+
+  if command -v rfkill > /dev/null && rfkill list wifi 2>/dev/null | grep -q "Soft blocked: yes"; then
+    bad "wifi is turned off (soft blocked)"
+    add_fix "turn wifi on" "rfkill unblock wifi; nmcli radio wifi on"
+  elif command -v nmcli > /dev/null && [ "$(nmcli radio wifi 2>/dev/null)" = "disabled" ]; then
+    bad "wifi is turned off in NetworkManager"
+    add_fix "turn wifi on" "nmcli radio wifi on"
+  fi
+  if command -v rfkill > /dev/null && rfkill list wifi 2>/dev/null | grep -q "Hard blocked: yes"; then
+    bad "wifi is hard blocked, check for a wifi switch or key"
+  fi
+  if ! systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    bad "NetworkManager is not running"
+    add_fix "start NetworkManager" "systemctl enable --now NetworkManager"
   fi
 }
 

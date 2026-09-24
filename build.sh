@@ -14,7 +14,7 @@ print_help() {
   echo "  luks            - Set this to 1 to encrypt the rootfs partition with LUKS2."
   echo "  luks_password   - The LUKS2 password. You will be prompted for it if this is not set."
   echo "  autoboot        - Seconds the bootloader waits before booting the rootfs. 0 disables it. Defaults to 5."
-  echo "  free_space      - Extra free space in MiB to leave on the rootfs partition. Defaults to 20% of the rootfs size."
+  echo "  free_space      - Extra free space in MiB to leave on the rootfs partition. Defaults to 10% of the rootfs size."
 }
 
 assert_root
@@ -118,7 +118,8 @@ create_stateful_image "$stateful_img"
 
 rootfs_used="$(dir_size_mb "$rootfs_dir")"
 if [ ! "$free_space" ]; then
-  free_space="$(( rootfs_used / 5 ))"
+  #the rootfs grows to fill the drive on the first boot, so keep the image small
+  free_space="$(( rootfs_used / 10 ))"
 fi
 #the journal, inode tables, and luks header take some space as well
 rootfs_part_size="$(( rootfs_used * 11 / 10 + free_space + 128 ))"

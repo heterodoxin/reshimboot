@@ -38,6 +38,8 @@ sudo ./build_complete.sh
 2. Put the Chromebook in developer mode (enrolled devices: see [sh1mmer](https://sh1mmer.me)), plug in the drive, and enter recovery mode.
 3. Debian boots automatically after a 5 second countdown. Log in as `user` / `user`, and the welcome screen asks you to pick a new password.
 
+The default image is **Debian 13 (trixie) with KDE Plasma**.
+
 ## Is my Chromebook supported?
 
 Only if its board is **dedede**: the Intel Jasper Lake Chromebooks from 2021 and later, with a Celeron N4500, Celeron N5100, or Pentium Silver N6000. Search for your model on [cros.download](https://cros.download/recovery) to see its board name.
@@ -54,9 +56,10 @@ dedede's shim runs **Linux 5.4.85**, and that can't be changed (see [kexec](#why
 
 | Feature | shimboot | reshimboot | Notes |
 |---|---|---|---|
-| Desktop (X11 / Wayland) | ✅ | ✅ | XFCE by default; KDE, GNOME and others available |
+| Desktop (X11 / Wayland) | ✅ | ✅ | KDE Plasma by default; GNOME, XFCE and others available |
 | 3D acceleration | ✅ | ✅ | Intel Gen 11 (Jasper Lake) |
-| Wi-Fi | ✅ | ✅ | Better defaults for WPA2/WPA3 networks |
+| Wi-Fi: Intel AX201 / 9560, Realtek RTL8822CE | ✅ | ✅ | Better defaults for WPA2/WPA3 networks |
+| Wi-Fi: Realtek RTL8852BE (some newer models) | ❌ | ❌ | No driver in the 5.4 kernel, [use USB](#wi-fi-doesnt-work) |
 | Bluetooth | ✅ | ✅ | |
 | Touchscreen, touchpad, webcam, backlight | ✅ | ✅ | Tap to click and two-finger right click like Chrome OS |
 | Internal speakers and mic | ❌ | 🧪 | Firmware path and UCM fix included, **needs hardware confirmation** |
@@ -64,7 +67,7 @@ dedede's shim runs **Linux 5.4.85**, and that can't be changed (see [kexec](#why
 | exFAT / NTFS drives | ❌ | ✅ | Through FUSE; the kernel has no driver for them |
 | iptables / firewalls | ❌ | ✅ | Legacy backend; the kernel has no nf_tables |
 | Steam and Flatpak sandboxes | ⚠️ manual fix | ✅ | `bwrap` is set up automatically |
-| Chrome OS without the forced update loop | ❌ | 🧪 | **Needs hardware confirmation** |
+| Chrome OS without the forced update loop | ❌ | 🧪 | Shows which Chrome OS partition is current; **needs hardware confirmation** |
 | Compressed RAM swap (zram) | ✅ | ✅ | lzo-rle; the kernel has no zstd |
 | Suspend / hibernate | ❌ | ❌ | Disabled in the shim kernel; lid close locks instead |
 | nftables, WireGuard, overlayfs, btrfs | ❌ | ❌ | Not built into the shim kernel |
@@ -79,7 +82,8 @@ dedede's shim runs **Linux 5.4.85**, and that can't be changed (see [kexec](#why
 - Falls back to the menu when something fails, instead of hanging on a black screen. LUKS password prompts allow retries.
 
 **A better system**
-- Debian 13 (Trixie) with the security and updates repositories, PipeWire, NetworkManager, systemd-resolved and timesyncd.
+- **Debian 13 (trixie) with KDE Plasma 6** by default. Debian 14 (forky) can be built as an experiment: the patched systemd that shimboot needs is compiled during the build (`build_systemd.sh`), so reshimboot isn't limited to the releases the shimboot repository covers.
+- PipeWire, NetworkManager, systemd-resolved and timesyncd.
 - A **welcome app** on first login that makes you replace the default password, because every prebuilt image shares it.
 - `shimboot-doctor` checks everything a bug report needs, and **`sudo shimboot-doctor --fix` repairs** the common problems automatically.
 - The rootfs grows to fill the drive on first boot.
@@ -91,6 +95,7 @@ dedede's shim runs **Linux 5.4.85**, and that can't be changed (see [kexec](#why
 - **No sound:** the 5.4 kernel needs to be told where the SOF firmware is, and that setting was taken from the wrong image. The Chromebook UCM configs are also installed, and survive upgrades. ([#518](https://github.com/ading2210/shimboot/issues/518))
 - **Random reboots to the recovery screen:** hung tasks and soft lockups no longer panic the kernel, dirty-page writeback to slow USB drives is capped, and suspend (which the kernel can't do) is disabled cleanly. ([#461](https://github.com/ading2210/shimboot/issues/461), [#423](https://github.com/ading2210/shimboot/issues/423))
 - **Chrome OS forcing an update on every boot** with the verified-mode spoof. See [below](#booting-chrome-os-through-reshimboot). ([#359](https://github.com/ading2210/shimboot/issues/359))
+- **The spoofed `crossystem` returned wrong or empty values**, for example for keys containing `=`, `#` or quotes, and ran `set` commands several times. It was rewritten and is more than 10 times faster, which matters because Chrome calls it often during startup.
 - iptables ([#414](https://github.com/ading2210/shimboot/issues/414)), exFAT ([#512](https://github.com/ading2210/shimboot/issues/512)), Wi-Fi ([#487](https://github.com/ading2210/shimboot/issues/487), [#506](https://github.com/ading2210/shimboot/issues/506)), locales ([#475](https://github.com/ading2210/shimboot/issues/475)), and Steam ([#306](https://github.com/ading2210/shimboot/issues/306)).
 
 **A much better build**
@@ -112,8 +117,9 @@ sudo ./build_complete.sh [option=value ...]
 
 | Option | Default | Description |
 |---|---|---|
-| `desktop` | `xfce` | `xfce`, `kde`, `gnome`, `lxqt`, `mate`, `cinnamon`, `lxde`, `gnome-flashback`, or `none` |
-| `release` | `trixie` | `trixie` (Debian 13), `bookworm` (12), `forky` or `sid` (see [below](#can-i-use-debian-testing-or-unstable)) |
+| `desktop` | `kde` | `kde`, `gnome`, `xfce`, `lxqt`, `mate`, `cinnamon`, `lxde`, `gnome-flashback`, or `none` |
+| `release` | `trixie` | `trixie` (Debian 13), `forky` (14, experimental), `bookworm` (12) or `sid` (see [below](#which-debian-release-should-i-use)) |
+| `systemd` | `auto` | Where the patched systemd comes from: `build` (compile it), `shimboot` (the prebuilt shimboot repo, trixie and bookworm only), or `auto` |
 | `username` / `user_passwd` | `user` / `user` | If you set a password, the first-login password prompt is skipped |
 | `hostname` | `reshimboot` | |
 | `timezone` | the build machine's | For example `America/New_York` |
@@ -130,7 +136,7 @@ sudo ./build_complete.sh [option=value ...]
 For example:
 
 ```bash
-sudo ./build_complete.sh desktop=kde compress_img=xz timezone=Europe/Berlin
+sudo ./build_complete.sh release=trixie desktop=xfce compress_img=xz timezone=Europe/Berlin
 ```
 
 The finished image is `data/shimboot_dedede.bin`, with a `.sha256` checksum next to it.
@@ -148,7 +154,8 @@ This uses Docker or Podman (rootful), and the image still ends up in `data/`.
 <details>
 <summary>Running the steps by hand</summary>
 
-1. `sudo ./build_rootfs.sh data/rootfs trixie` builds the Debian rootfs.
+1. For forky only: `sudo ./build_systemd.sh data/systemd forky source_release=trixie` compiles the patched systemd.
+1. `sudo ./build_rootfs.sh data/rootfs trixie` builds the Debian rootfs (for forky, add `systemd_repo=data/systemd/forky`).
 2. `sudo ./patch_rootfs.sh shim.bin reco.bin data/rootfs` adds the dedede kernel modules, firmware, and audio configs.
 3. `sudo ./build.sh image.bin shim.bin data/rootfs` writes the disk image.
 
@@ -175,8 +182,8 @@ Use a decent USB 3 drive or SD card. Cheap USB 2 drives work, but slowly.
 └───────────────────────────┘
 r1.0.0 - kernel 5.4.85-22138-ga9994f5cad40
 
-1) ChromeOS_ROOT-A on /dev/mmcblk1p3
-2) ChromeOS_ROOT-B on /dev/mmcblk1p5
+1) ChromeOS_ROOT-A_R151_16715.62.0_(older) on /dev/mmcblk1p3
+2) ChromeOS_ROOT-B_R152_16765.49.0_(current) on /dev/mmcblk1p5
 3) debian on /dev/sda4
 q) reboot
 s) enter a shell
@@ -196,7 +203,13 @@ booting debian in 5 seconds, press any key for the menu...
 
 Pick a `ChromeOS_ROOT` entry to boot the Chrome OS that's on the internal drive. It borrows the kernel modules from your Debian partition, and asks whether to spoof verified mode and an invalid HWID. That's useful on enrolled devices.
 
-**No more forced update loop.** With the spoof on, Chrome OS still ran `update_engine` on every boot. That put a forced "update required" screen in front of the setup screens even when nothing needed updating. Worse, if an update ever finished, Chrome OS booted *normally* afterwards and locked the device again, which undid the spoof. reshimboot now stops `update_engine` for that boot by bind-mounting over its upstart job. Nothing is written to your internal drive, and booting Chrome OS without reshimboot brings updates back.
+**Pick the `(current)` partition.** Chrome OS keeps two copies of itself (ROOT-A and ROOT-B) and installs each update into the one it isn't using. The menu now shows each copy's version, and marks the one that a normal boot would use as `(current)`. Booting the `(older)` copy through shimboot makes Chrome OS download and install the same update again every time, which was a common cause of the "forced update on every boot" reports. reshimboot warns you before booting the older copy.
+
+**No more forced update loop.** With the spoof on, Chrome OS still ran `update_engine` on every boot. That put a forced "update required" screen in front of the setup screens even when nothing needed updating. Worse, if an update ever finished, Chrome OS booted *normally* afterwards and locked the device again, which undid the spoof. reshimboot now stops `update_engine` for that boot by bind-mounting over its upstart job. Nothing is written to your internal drive, and booting Chrome OS without reshimboot brings updates back. This can't help if your school sets a minimum Chrome OS version that the `(current)` copy is older than; then the update-required screen comes from policy, and the only fix is to update Chrome OS normally.
+
+**Known limits on recent Chrome OS versions**, found by examining the current dedede recovery image (R152):
+- Early startup (`chromeos_startup`) now reads the firmware state through `libcrossystem` directly, not the `crossystem` command. It sees the real recovery-mode boot, whatever the spoof says. The spoof still covers Chrome and the scripts that run `crossystem`.
+- `chromeos_startup` now sets up the encrypted stateful partition itself, without running `mount-encrypted`. So the `--unsafe` persistence workaround from shimboot no longer takes effect, and Chrome OS data may not survive between shimboot sessions.
 
 Google keeps changing how verified mode is detected, so the spoof itself may still fail on the newest Chrome OS versions.
 
@@ -207,6 +220,12 @@ Open a terminal and run `shimboot-doctor`. It checks systemd, storage, Wi-Fi, au
 
 #### It won't boot any more
 At the bootloader menu, try `f` to repair the filesystem. If that doesn't help, type `rescue <number>` to get a shell and look at `journalctl -b -1`. If you see "Failed to mount API filesystems", run `sudo shimboot-doctor --fix` from the rescue shell to reinstall the patched systemd.
+
+#### Wi-Fi doesn't work
+Run `shimboot-doctor` and look at the Wi-Fi section.
+- If it says your card **has no driver in the shim kernel**, your model has a Realtek RTL8852BE, which Linux 5.4 doesn't support. Since the kernel can't be replaced (see [kexec](#why-not-a-newer-kernel-kexec)), use a USB Wi-Fi adapter, a USB Ethernet adapter, or USB tethering from a phone. Adapters that work with Linux out of the box (for example ones with Realtek RTL8188/RTL8192/RTL8812 chips) are the safest choice.
+- If Wi-Fi is switched off or the firmware failed to load, `sudo shimboot-doctor --fix` turns it back on or reinstalls the firmware.
+- Intel AX201 and 9560 cards (most dedede models) and the Realtek RTL8822CE are supported. Please open an issue with the `shimboot-doctor` output if one of these doesn't work.
 
 #### Some Wi-Fi networks won't connect
 Mixed WPA2/WPA3 networks work out of the box. For a network that *only* allows WPA3, run:
@@ -223,11 +242,15 @@ Run `shimboot-doctor` and look at the audio section. Internal audio is the least
 #### How do I mount a USB stick or SD card?
 It mounts automatically in the file manager, including exFAT and NTFS.
 
-#### Can I use Debian testing or unstable?
-`release=forky` and `release=sid` are allowed, but not recommended. The patched systemd can lag behind Debian. The build stops if the right one isn't available, rather than make an image that won't boot. Newer systemd versions may also need a kernel newer than 5.4.
+#### Which Debian release should I use?
+**trixie (Debian 13)**, the default. It's the stable release and uses shimboot's prebuilt, patched systemd.
+
+**forky (Debian 14)** is experimental. systemd 258 and newer need Linux 5.10 or later: forky's own systemd (261) was booted in QEMU on a stock 5.4 kernel and failed with "Failed to mount early API filesystems". So forky builds use trixie's systemd (257), compiled for forky and patched. Only a few forky packages need a newer systemd, but one of them is GNOME's login screen, so the build refuses GNOME on forky. This combination hasn't been boot-tested yet. **sid** has the same limits, and it changes every day.
+
+With a locally built systemd, the image keeps a copy in `/var/lib/reshimboot/systemd-repo`, and apt is pinned so Debian's unpatched systemd can't replace it.
 
 #### How do I upgrade to a newer Debian release?
-Replace the release name in `/etc/apt/sources.list.d/*.sources` (the shimboot one too), then run `sudo apt update && sudo apt full-upgrade`. The apt hook warns you if the patched systemd isn't available for the new release; don't reboot if it does.
+Replace the release name in `/etc/apt/sources.list.d/debian.sources`, then run `sudo apt update && sudo apt full-upgrade`. The apt hook warns you if the upgrade tries to replace the patched systemd; don't reboot if it does. Upgrading from trixie to forky isn't possible this way, because the shimboot repo doesn't have a forky systemd. Build a new forky image instead.
 
 #### Why is there no suspend?
 The shim kernel has suspend disabled, and trying to suspend could crash the Chromebook. reshimboot turns it off everywhere, and closing the lid locks the screen instead.

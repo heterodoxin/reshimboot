@@ -65,19 +65,62 @@ find_rootfs_partitions() {
   done
 }
 
+#describe a chrome os root partition, such as "R152_16765.49.0_(current)".
+#chrome os updates install to the other root partition, and normal boots
+#use the kernel with the highest priority. booting the older root partition
+#through shimboot makes chrome os want to install the same update again.
+describe_chromeos_partition() {
+  local part="$1"
+  local mnt="/tmp/cros_probe"
+  local milestone=""
+  local version=""
+  mkdir -p "$mnt"
+  if mount -o ro "$part" "$mnt" 2>/dev/null; then
+    milestone="$(sed -n 's/^CHROMEOS_RELEASE_CHROME_MILESTONE=//p' "$mnt/etc/lsb-release" 2>/dev/null)"
+    version="$(sed -n 's/^CHROMEOS_RELEASE_VERSION=//p' "$mnt/etc/lsb-release" 2>/dev/null)"
+    umount "$mnt"
+  fi
+
+  local description="unknown_version"
+  if [ "$version" ]; then
+    description="R${milestone}_${version}"
+  fi
+
+  #the kernel partition is the one right before the root partition
+  local part_num="$(echo "$part" | sed 's/.*[^0-9]\([0-9]*\)$/\1/')"
+  local disk="$(echo "$part" | sed 's/p\{0,1\}[0-9]*$//')"
+  local kern_num=$((part_num - 1))
+  local priority="$(cgpt show -i "$kern_num" -P "$disk" 2>/dev/null)"
+  local best_priority=0
+  local other
+  for other in 2 4; do
+    local other_priority="$(cgpt show -i "$other" -P "$disk" 2>/dev/null)"
+    if [ "$other_priority" -gt "$best_priority" ] 2>/dev/null; then
+      best_priority="$other_priority"
+    fi
+  done
+  #the marker is left out when the priorities cannot be read
+  if [ "$priority" -gt 0 ] 2>/dev/null && [ "$priority" = "$best_priority" ]; then
+    description="${description}_(current)"
+  elif [ "$priority" -ge 0 ] 2>/dev/null && [ "$best_priority" -gt 0 ]; then
+    description="${description}_(older)"
+  fi
+  echo "$description"
+}
+
 find_chromeos_partitions() {
   local roota_partitions="$(cgpt find -l ROOT-A)"
   local rootb_partitions="$(cgpt find -l ROOT-B)"
 
   if [ "$roota_partitions" ]; then
     for partition in $roota_partitions; do
-      echo "${partition}:ChromeOS_ROOT-A:CrOS"
+      echo "${partition}:ChromeOS_ROOT-A_$(describe_chromeos_partition "$partition"):CrOS"
     done
   fi
 
   if [ "$rootb_partitions" ]; then
     for partition in $rootb_partitions; do
-      echo "${partition}:ChromeOS_ROOT-B:CrOS"
+      echo "${partition}:ChromeOS_ROOT-B_$(describe_chromeos_partition "$partition"):CrOS"
     done
   fi
 }
@@ -239,6 +282,15 @@ get_selection() {
     if [ "$selection" = "$i" ]; then
       echo "selected $part_path"
       if [ "$part_flags" = "CrOS" ]; then
+        local part_name="$(echo "$rootfs_partition" | cut -d ":" -f 2)"
+        if echo "$part_name" | grep -q "_(older)$"; then
+          echo "warning: this is the older chrome os partition. chrome os installs its updates to"
+          echo "the other partition, so booting this one makes it ask to update again every time."
+          yes_no_prompt "boot it anyway? pick 'n' and choose the (current) partition instead. (y/n): " boot_older
+          if [ "$boot_older" != "y" ]; then
+            return 1
+          fi
+        fi
         echo "booting chrome os partition"
         print_donor_selector "$rootfs_partitions"
         get_donor_selection "$rootfs_partitions" "$part_path"
@@ -571,7 +623,7 @@ boot_chromeos() {
     echo "patching crossystem"
     cp /opt/crossystem /newroot/tmp/crossystem
     if [ "$invalid_hwid" = "y" ]; then
-      sed -i 's/block_devmode/hwid/' /newroot/tmp/crossystem
+      sed -i 's/^invalid_hwid=0$/invalid_hwid=1/' /newroot/tmp/crossystem
     fi
 
     cp /newroot/usr/bin/crossystem /newroot/tmp/crossystem_old
