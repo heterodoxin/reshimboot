@@ -22,6 +22,12 @@ echo "For documentation and to report bugs, please visit the project's Github pa
 echo " - https://github.com/heterodoxin/reshimboot"
 echo "Run 'shimboot-doctor' to check for common problems."
 
+if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/reshimboot/default-password" ]; then
+  echo
+  echo "Warning: You are still using the default password. Run 'passwd' to change it,"
+  echo "then 'rm ~/.config/reshimboot/default-password' to hide this message."
+fi
+
 #a rootfs under 7GB should mean that it is not yet expanded
 if [ "$percent_full" -gt 80 ] && [ "$total_size" -lt 7000 ]; then
   echo

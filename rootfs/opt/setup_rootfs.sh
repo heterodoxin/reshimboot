@@ -161,11 +161,14 @@ install_patched_systemd() {
   apt-get upgrade "${apt_opts[@]}" --allow-downgrades
 
   #reinstall anything that also exists in the shimboot repo, since the
-  #versions can be identical. clear the cache first so that the copies
-  #that debootstrap downloaded from debian are not reused.
-  apt-get clean
-  local shimboot_pkgs
+  #versions can be identical. delete the cached copies first so that the
+  #ones downloaded from debian are not reused. only these packages are
+  #removed, so a shared package cache between builds keeps working.
+  local shimboot_pkgs pkg
   shimboot_pkgs="$(installed_shimboot_packages)"
+  for pkg in $shimboot_pkgs; do
+    rm -f "/var/cache/apt/archives/${pkg}_"*.deb
+  done
   if [ "$shimboot_pkgs" ]; then
     # shellcheck disable=SC2086
     apt_install --reinstall --allow-downgrades $shimboot_pkgs
@@ -177,7 +180,6 @@ install_patched_systemd() {
     echo "Error: the patched systemd was not installed correctly. The image would not boot." >&2
     exit 1
   fi
-  apt-get clean
 }
 
 install_base_packages() {
@@ -301,6 +303,10 @@ install_desktop() {
   apt_install $PACKAGES
 
   #extras that the task packages do not always pull in
+  if [ "$PACKAGES" ]; then
+    #zenity runs the first login welcome, mesa-utils is used by shimboot-doctor
+    apt_install_available zenity mesa-utils
+  fi
   case "$PACKAGES" in
     *xfce*|*lxde*|*mate*|*lxqt*|*cinnamon*)
       apt_install_available blueman pavucontrol network-manager-gnome
@@ -309,6 +315,11 @@ install_desktop() {
       apt_install_available plasma-nm bluedevil plasma-pa
       ;;
   esac
+
+  #apply the gnome defaults from /usr/share/glib-2.0/schemas/90-reshimboot.gschema.override
+  if command -v glib-compile-schemas > /dev/null; then
+    glib-compile-schemas /usr/share/glib-2.0/schemas
+  fi
 
   #make sure pipewire won and pulseaudio is gone
   apt_install_available pipewire-audio
@@ -353,6 +364,15 @@ create_user() {
 
   echo "Enter a user password:"
   set_password "$NEW_USERNAME" "$USER_PASSWD"
+
+  #prebuilt images all share the same password, so the welcome app and the
+  #terminal greeter keep asking to change it until this marker is removed
+  if [ "$DEFAULT_PASSWORD" = "1" ]; then
+    local state_dir="/home/$NEW_USERNAME/.config/reshimboot"
+    mkdir -p "$state_dir"
+    touch "$state_dir/default-password"
+    chown -R "$NEW_USERNAME:$NEW_USERNAME" "/home/$NEW_USERNAME/.config"
+  fi
 }
 
 unit_exists() {
@@ -389,6 +409,12 @@ enable_services() {
 
 finalize() {
   print_step "cleaning up"
+  #remove the certificate that was only trusted for the build
+  if [ -f /usr/local/share/ca-certificates/reshimboot-build.crt ]; then
+    rm -f /usr/local/share/ca-certificates/reshimboot-build.crt
+    update-ca-certificates --fresh > /dev/null
+  fi
+
   #disable selinux to prevent a harmless error from showing up during the boot
   mkdir -p /etc/selinux
   echo "SELINUX=disabled" > /etc/selinux/config
@@ -398,7 +424,11 @@ finalize() {
     echo '[[ $- == *i* ]] && /usr/local/bin/shimboot_greeter' >> "/home/$NEW_USERNAME/.bashrc"
   fi
 
-  apt-get clean
+  #with a shared package cache, the cache is a bind mount that is removed
+  #after the build, so the image ends up without the packages either way
+  if [ "$APT_CACHE_SHARED" != "1" ]; then
+    apt-get clean
+  fi
 
   #a fresh machine id is generated on the first boot, so that every
   #prebuilt image does not share the same one
@@ -415,6 +445,8 @@ main() {
   write_apt_sources
   apt-get update
   apt_install ca-certificates
+  #pick up a build-only certificate from extra_ca, if there is one
+  update-ca-certificates > /dev/null
 
   write_shimboot_sources
   if [ "$ENABLE_I386" = "1" ]; then
@@ -424,6 +456,9 @@ main() {
 
   install_patched_systemd
   configure_hostname
+
+  #the bootloader copies this to check the rootfs before booting it
+  apt_install_available e2fsck-static
 
   if [ ! "$DISABLE_BASE" ]; then
     install_base_packages

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=reshimboot
+Comment=Tips, password change, and a system check for reshimboot
+Exec=/usr/local/bin/reshimboot-welcome --always
+Icon=computer
+Terminal=false
+Categories=System;Settings;

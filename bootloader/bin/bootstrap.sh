@@ -154,6 +154,9 @@ print_selector() {
 
   echo "q) reboot"
   echo "s) enter a shell"
+  if [ -x /bin/e2fsck.static ]; then
+    echo "f) check and repair a filesystem"
+  fi
   echo "l) view license"
   echo "type 'rescue <number>' to boot into a rescue shell"
 }
@@ -210,6 +213,9 @@ get_selection() {
     reset
     enable_debug_console "$TTY1"
     return 0
+  elif [ "$selection" = "f" ]; then
+    repair_filesystem "$rootfs_partitions"
+    return 1
   elif [ "$selection" = "l" ]; then
     clear
     print_license
@@ -358,22 +364,115 @@ boot_failed() {
   return 1
 }
 
-boot_target() {
+#unlock the rootfs if it is encrypted. the device to use is stored in
+#$rootfs_device, which is the partition itself when it is not encrypted.
+open_rootfs() {
   local target="$1"
-  local device="$target"
-
-  mkdir -p /newroot
-  #use cryptsetup to check if the rootfs is encrypted
+  rootfs_device="$target"
   if [ -x "$(command -v cryptsetup)" ] && cryptsetup isLuks "$target" >/dev/null 2>&1; then
     local tries=0
     while ! cryptsetup open --allow-discards "$target" rootfs; do
       tries=$((tries+1))
       if [ "$tries" -ge 3 ]; then
-        boot_failed "failed to unlock $target"
         return 1
       fi
     done
-    device="/dev/mapper/rootfs"
+    rootfs_device="/dev/mapper/rootfs"
+  fi
+}
+
+#check the rootfs before it is mounted, so that a drive that was unplugged or
+#lost power while writing gets repaired instead of getting more corrupted.
+#this uses a static e2fsck, since the shim's busybox does not have one.
+#returns 1 if the boot should be cancelled.
+check_filesystem() {
+  local device="$1"
+  if [ ! -x /bin/e2fsck.static ]; then
+    return 0
+  fi
+
+  echo "checking the filesystem on $device"
+  /bin/e2fsck.static -p "$device"
+  local result="$?"
+
+  #the exit code is a bit mask: 1 and 2 = errors were fixed,
+  #4 = errors are left, 8 and up = e2fsck itself failed
+  if [ "$result" -ge 8 ]; then
+    echo "could not check the filesystem (e2fsck exited with $result), booting anyway"
+    sleep 2
+  elif [ "$((result & 4))" -ne 0 ]; then
+    echo "the filesystem has errors that could not be fixed automatically."
+    yes_no_prompt "run a full repair now? this can take a few minutes. (y/n): " run_repair
+    if [ "$run_repair" = "y" ]; then
+      /bin/e2fsck.static -fy "$device"
+      result="$?"
+    fi
+    if [ "$((result & 4))" -ne 0 ] || [ "$result" -ge 8 ]; then
+      yes_no_prompt "the filesystem still has errors. boot anyway? (y/n): " boot_anyway
+      if [ "$boot_anyway" != "y" ]; then
+        return 1
+      fi
+    fi
+  elif [ "$result" -ne 0 ]; then
+    echo "filesystem errors were found and fixed"
+    sleep 1
+  fi
+  return 0
+}
+
+#the "f" menu option: run a full check on a partition that the user picks
+repair_filesystem() {
+  local rootfs_partitions="$1"
+  local i=1
+  echo "Choose a partition to check and repair:"
+  for rootfs_partition in $rootfs_partitions; do
+    local part_flags="$(echo "$rootfs_partition" | cut -d ":" -f 3)"
+    if [ "$part_flags" = "CrOS" ]; then
+      continue
+    fi
+    echo "${i}) $(echo "$rootfs_partition" | cut -d ":" -f 2) on ${rootfs_partition%%:*}"
+    i=$((i+1))
+  done
+  read -p "Your selection: " selection
+
+  i=1
+  for rootfs_partition in $rootfs_partitions; do
+    local part_flags="$(echo "$rootfs_partition" | cut -d ":" -f 3)"
+    if [ "$part_flags" = "CrOS" ]; then
+      continue
+    fi
+    if [ "$selection" = "$i" ]; then
+      if ! open_rootfs "${rootfs_partition%%:*}"; then
+        echo "failed to unlock the partition"
+      else
+        /bin/e2fsck.static -fy "$rootfs_device"
+        echo "e2fsck finished with exit code $?"
+        if [ "$rootfs_device" = "/dev/mapper/rootfs" ]; then
+          cryptsetup close rootfs
+        fi
+      fi
+      read -p "press [enter] to return to the bootloader menu"
+      return 0
+    fi
+    i=$((i+1))
+  done
+  echo "invalid selection"
+  sleep 1
+}
+
+boot_target() {
+  local target="$1"
+
+  mkdir -p /newroot
+  if ! open_rootfs "$target"; then
+    boot_failed "failed to unlock $target"
+    return 1
+  fi
+  local device="$rootfs_device"
+
+  if [ "$rescue_mode" != "1" ] && ! check_filesystem "$device"; then
+    cleanup_boot
+    return 1
   fi
 
   #discard trims the usb/sd card, noatime avoids a write on every read
@@ -430,7 +529,11 @@ boot_chromeos() {
   echo "mounting modules and firmware from the donor partition"
   local donor_mount="/newroot/tmp/donor_mnt"
   mkdir -p "$donor_mount"
-  mount -o ro "$donor" "$donor_mount"
+  if ! mount -o ro "$donor" "$donor_mount"; then
+    umount /newroot/run /newroot/tmp 2>/dev/null
+    boot_failed "failed to mount the donor partition $donor (encrypted donors are not supported)"
+    return 1
+  fi
   mount -o bind,ro "$donor_mount/lib/modules" /newroot/lib/modules
   mount -o bind,ro "$donor_mount/lib/firmware" /newroot/lib/firmware
   umount "$donor_mount"
@@ -489,6 +592,11 @@ boot_chromeos() {
 
 main() {
   echo "starting the shimboot bootloader"
+
+  #e2fsck uses this to make sure that it never checks a mounted filesystem
+  if [ ! -e /etc/mtab ]; then
+    ln -s /proc/mounts /etc/mtab
+  fi
 
   enable_debug_console "$TTY2"
 

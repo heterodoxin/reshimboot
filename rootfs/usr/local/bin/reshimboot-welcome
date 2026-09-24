@@ -1,0 +1,92 @@
+#!/bin/bash
+
+#first login welcome for reshimboot
+#it explains the basics once, and keeps asking you to replace the default
+#password until you do, since every prebuilt image ships with the same one.
+#run with --always to show it again.
+
+state_dir="${XDG_CONFIG_HOME:-$HOME/.config}/reshimboot"
+default_pw_marker="$state_dir/default-password"
+done_marker="$state_dir/welcome-done"
+title="Welcome to reshimboot"
+
+if ! command -v zenity > /dev/null; then
+  exit 0
+fi
+if [ "$1" != "--always" ] && [ -f "$done_marker" ] && [ ! -f "$default_pw_marker" ]; then
+  exit 0
+fi
+
+error() {
+  zenity --error --title="$title" --width=400 --text="$1"
+}
+
+#returns 0 once the password has been changed, 1 if the user gave up
+change_password() {
+  local form current new repeat
+  while true; do
+    form="$(zenity --forms --title="$title" --width=420 \
+      --text="Choose a new password for $USER.\nOn prebuilt images the current password is \"user\"." \
+      --add-password="Current password" \
+      --add-password="New password" \
+      --add-password="Repeat the new password" \
+      --separator=$'\n')" || return 1
+    { IFS= read -r current; IFS= read -r new; IFS= read -r repeat; } <<< "$form"
+
+    if [ ! "$new" ]; then
+      error "The new password cannot be empty."
+    elif [ "$new" != "$repeat" ]; then
+      error "The new passwords do not match."
+    elif [ "$new" = "$current" ]; then
+      error "The new password is the same as the current one."
+    elif ! printf '%s\n' "$current" | sudo -S -k -p '' -v 2> /dev/null; then
+      error "The current password is not correct."
+    elif printf '%s\n%s:%s\n' "$current" "$USER" "$new" | sudo -S -k -p '' chpasswd 2> /dev/null; then
+      rm -f "$default_pw_marker"
+      zenity --info --title="$title" --width=360 --text="Your password has been changed."
+      return 0
+    else
+      error "The password could not be changed."
+    fi
+  done
+}
+
+show_welcome() {
+  local text choice
+  text="<b>reshimboot is running.</b>
+
+• Everything lives on this USB drive or SD card. Shut down from the menu before unplugging it, or files can get corrupted. The bootloader checks and repairs the drive on every boot.
+• Suspend is not possible with the Chromebook's shim kernel, so closing the lid locks the screen instead.
+• To get back to Chrome OS, shut down and unplug the drive.
+• Something not working? Open a terminal and run <tt>shimboot-doctor</tt>, or <tt>sudo shimboot-doctor --fix</tt> to repair common problems.
+
+Documentation and bug reports: https://github.com/heterodoxin/reshimboot"
+  choice="$(zenity --info --title="$title" --width=520 --text="$text" \
+    --ok-label="Close" --extra-button="Run a system check")"
+  if [ "$choice" = "Run a system check" ]; then
+    shimboot-doctor 2>&1 | sed 's/\x1b\[[0-9;]*m//g' \
+      | zenity --text-info --title="reshimboot system check" --width=720 --height=520 --font="monospace"
+  fi
+}
+
+ask_password() {
+  local choice
+  choice="$(zenity --question --title="$title" --width=440 \
+    --text="You are still using the default password, which is the same on every prebuilt reshimboot image. Anyone who knows it can log in and use sudo.\n\nChange it now?" \
+    --ok-label="Change it now" --cancel-label="Remind me later" --extra-button="I already changed it")"
+  local result="$?"
+  if [ "$choice" = "I already changed it" ]; then
+    rm -f "$default_pw_marker"
+  elif [ "$result" -eq 0 ]; then
+    change_password
+  fi
+}
+
+mkdir -p "$state_dir"
+if [ "$1" = "--always" ] || [ ! -f "$done_marker" ]; then
+  show_welcome
+fi
+if [ -f "$default_pw_marker" ]; then
+  ask_password
+fi
+touch "$done_marker"
