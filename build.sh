@@ -75,7 +75,9 @@ if is_true "$luks_enabled"; then
   fi
 fi
 
-work_dir="$(mktemp -d /tmp/reshimboot_build.XXXXXX)"
+#the rootfs image is as big as the rootfs, so build it next to the output
+#image instead of in /tmp, which is often small or a tmpfs
+work_dir="$(mktemp -d "$(dirname "$output_path")/.reshimboot_build.XXXXXX")"
 add_cleanup "rm -rf '$work_dir'"
 initramfs_dir="$work_dir/initramfs"
 kernel_img="$work_dir/kernel.bin"

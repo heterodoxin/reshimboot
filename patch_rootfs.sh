@@ -29,7 +29,7 @@ audio="${args['audio']:-1}"
 ucm_repo="https://github.com/WeirdTreeThing/alsa-ucm-conf-cros"
 ucm_commit="a46dd19"
 
-stage_dir="$(mktemp -d /tmp/reshimboot_patch.XXXXXX)"
+stage_dir="$(mktemp -d -t reshimboot_patch.XXXXXX)"
 add_cleanup "rm -rf '$stage_dir'"
 
 #copy /lib/firmware (and the touchscreen firmware it links to) out of an image
